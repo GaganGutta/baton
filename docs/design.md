@@ -15,6 +15,7 @@ Contents:
 5. [M2 — The state machine](#5-m2--the-state-machine)
 6. [M3 — Networking](#6-m3--networking)
 7. [M4 — Leases, retries, time and the dead-letter queue](#7-m4--leases-retries-time-and-the-dead-letter-queue)
+8. [M5 — Snapshots and log compaction](#8-m5--snapshots-and-log-compaction)
 
 ---
 
@@ -1029,6 +1030,190 @@ not detected.
 - **The grace period is one number for all leases.** A worker whose lease was
   hours long and a worker whose lease was 100 ms get the same grace after a
   restart.
+
+## 8. M5 — Snapshots and log compaction
+
+Without compaction the log grows forever and recovery replays all of it. A
+snapshot is the durable state as of some LSN; once it is safely on disk, the
+log before that LSN can go, and recovery becomes "load the snapshot, replay the
+tail".
+
+### 8.1 The hard part: a consistent copy without stopping the world
+
+A snapshot must describe one instant (everything up to LSN *X*, nothing after),
+but writing it takes seconds and the event loop must keep mutating state
+meanwhile. Three ways to get a consistent view were evaluated:
+
+**fork() and copy-on-write** (what Redis does). The child sees memory frozen at
+the fork and writes it out at leisure. The pause is only the fork itself,
+which copies page tables: roughly 10–20 ms per GB.
+Rejected because:
+
+- *baton is multithreaded.* After `fork()` only the calling thread exists in
+  the child. If the log thread held a lock at that instant — the allocator's,
+  the logger's, the stats mutex — it is held forever in the child. POSIX
+  permits only async-signal-safe calls there; serializing a state machine is
+  not that. glibc happens to reset its malloc locks in the child, which is why
+  this works for Redis in practice, but it is an implementation detail, not a
+  contract, and it does not extend to our own mutexes.
+- *It cannot be tested the way baton tests durability.* The whole crash-testing
+  approach rests on `SimFs`, an in-process file system; a forked child's writes
+  to it are invisible to the parent. Snapshot writing would be the one
+  durability path without crash-image tests, and ThreadSanitizer does not
+  support forking a threaded process either.
+- Copy-on-write can double memory under write load, invisibly, and the fork
+  pause still grows with the heap.
+
+**Incremental snapshots** (persist only what changed since the last one). The
+smallest pause and the least I/O, but recovery then needs a chain of deltas,
+each a new way for one bad file to make everything after it unusable, plus a
+merge step to keep the chain short. Too much machinery — and too many new
+failure modes — for the problem at hand. On the roadmap.
+
+**Copy, then write in the background** — chosen. The event loop makes a
+consistent in-memory copy of the durable state (`State::capture_image()`), and
+a background thread serializes that private copy, fsyncs it and swaps it in.
+The thread shares nothing mutable with the loop, so there are no locks and
+nothing for TSan to find; it runs on `SimFs` like everything else, so every
+step of the write protocol gets crash-image tests.
+
+The cost is that the pause is the time to make the copy, which grows with the
+number of live jobs. Two things keep it small: payloads are immutable and
+reference-counted (`SharedBytes`, put in place in M2 for exactly this), so
+copying a job copies ~100 bytes of metadata and bumps a counter, however large
+the payload; and only durable fields are copied, never indexes or timers. The
+pause is measured (section 8.6), not assumed.
+
+### 8.2 File format
+
+```
+snapshot-00000000000001048576.snap     the number is the LSN the snapshot covers
+```
+
+A header (magic `BATONSNP`, version, LSN, creation time, CRC) followed by
+**chunks framed exactly like log records** (`length | crc32c | type | sequence
+| payload`, reusing the log's encoder and parser) and terminated by an end
+chunk carrying totals:
+
+| Chunk | Contents |
+|---|---|
+| meta | id and token counters, the queue table with per-queue totals |
+| jobs | up to 4,096 jobs each; as many chunks as needed |
+| idempotency | up to 4,096 keys each |
+| end | chunk, job and key counts — a file without it is incomplete |
+
+Chunking means neither writing nor loading ever holds the whole serialized
+state in memory, and a checksum failure names the chunk. Sequence numbers must
+be contiguous and the end chunk's totals must match, so truncation at a chunk
+boundary cannot pass for a complete snapshot.
+
+### 8.3 Write protocol
+
+1. The loop captures the image and notes `X = last LSN`. It hands the image to
+   the snapshot thread **only once the log has committed `X`**: a snapshot must
+   never be ahead of the durable log, or a crash would leave a state whose own
+   history is missing.
+2. The thread writes `snapshot-X.tmp`, fsyncs it, renames it to
+   `snapshot-X.snap`, and fsyncs the directory. Only now does the snapshot
+   exist as far as recovery is concerned.
+3. The thread deletes what is no longer needed and fsyncs the directory again:
+   snapshots other than the newest two, and log segments that lie entirely at
+   or before the **older** retained snapshot.
+
+**Two snapshots are kept**, and the log needed by the older one, so that a
+newest snapshot that turns out to be unreadable (bit rot; the write protocol
+itself cannot produce a torn `.snap`) still leaves a way to recover: the older
+snapshot plus a longer tail. With a single snapshot, no segment is deleted.
+The price is disk space: up to two snapshots plus the log since the older one.
+
+A crash at any point leaves either the old world (a stray `.tmp`, deleted at
+startup) or the new one. Deletions happen strictly after the snapshot that
+makes them safe is durable.
+
+### 8.4 Recovery
+
+Newest snapshot first: validate everything (header, every chunk's CRC,
+sequence, totals) while loading into a fresh `State`; on any failure log a
+warning and try the older snapshot; if none loads, fall back to replaying the
+log from the beginning. Then replay the log after the snapshot's LSN through
+the usual `apply`, and `end_replay()`. If the segments needed by whichever
+snapshot was chosen are missing, the log layer refuses (section 4.4), exactly
+as it would for any other gap.
+
+Log recovery starts at the last segment that begins at or before the first LSN
+it needs. Segments entirely behind the snapshot are leftovers of a compaction
+that a crash interrupted; they are ignored, not validated. This was a bug
+found by the crash tests, not foresight: compaction unlinks several segments
+and then fsyncs the directory once, and a power failure in between may persist
+*some* of the unlinks — say, segment 2 gone and segment 1 still there. The
+first version of recovery checked continuity across every segment it found and
+refused to start on that hole, although nothing it needed was missing.
+(`SimFs` had to learn to keep an arbitrary subset of un-synced directory
+operations to produce this; section 8.7.)
+
+### 8.5 When
+
+After every `--snapshot-every` bytes of log (default 256 MiB), at most one at a
+time; and on the `SNAPSHOT` command. The snapshot thread is started per
+snapshot and joined by the loop when it reports back through the wake pipe.
+
+### 8.6 Measurements
+
+`bench/storage_bench` measures, on a real file system: the event-loop pause
+(`capture_image`) and the total snapshot time against the number of live jobs,
+and recovery time against log length with and without a snapshot. Results and
+the exact commands are in `docs/benchmarks.md`.
+
+### 8.7 Test plan
+
+Image round trip equals `State::serialize` equivalence (snapshot + tail ==
+full replay, already part of the model test, now through real files); a
+`SimFs` crash image after *every* file-system operation of a snapshot cycle
+must recover to the same state as the log alone; torn, truncated-at-a-chunk-
+boundary and bit-flipped snapshots fall back to the older one; segments are
+never deleted before the covering snapshot is durable, and never with only one
+snapshot; a snapshot is never finalized ahead of the committed LSN; TSan over
+the hand-off; a fuzz target for the loader; through the wire, `SNAPSHOT`
+followed by restart and by a power-loss image.
+
+The crash-image test needed a harsher `SimFs`. Until M5 a crash image kept
+either all or none of a directory's un-synced operations, which is kinder than
+real file systems: they may persist some creates, renames and unlinks and not
+others. In torn mode `SimFs` now keeps a seeded random subset of them (in
+their original order), and the snapshot protocol is run against many seeds at
+every crash point. That model is what found the recovery bug described in 8.4.
+It still assumes what POSIX promises: a rename is atomic, and an fsynced
+directory has everything before the fsync.
+
+### 8.8 Limitations
+
+- **The pause grows with the number of live jobs.** It is the time to copy
+  ~160 bytes per job; measured in `docs/benchmarks.md`. Fine for hundreds of
+  thousands of jobs, a visible stall at a million. The fix is an incremental
+  capture (copy a slice per loop iteration, with copy-on-write for jobs touched
+  meanwhile); it is on the roadmap because it is exactly the kind of cleverness
+  that needs its own test campaign.
+- **Memory while a snapshot is written**: the image (~160 bytes per job) plus
+  every payload that finishes during the write, which the image keeps alive
+  until the write ends.
+- **A snapshot does not make recovery faster unless the log is longer than the
+  state** (measured: loading a job costs about as much as replaying the three
+  records of its life). What snapshots buy is a bound: recovery time and disk
+  use stop growing with uptime.
+- **Replay keeps every job of the replayed tail in memory** until it ends,
+  because retention is only enforced once derived state exists. The tail is at
+  most `--snapshot-every` of log, unless snapshots are turned off.
+- **Disk use** is up to two snapshots plus the log since the older one: about
+  twice the state plus twice `--snapshot-every` in the worst case.
+- **Triggers are log growth and the command only**: no time-based trigger, no
+  snapshot at shutdown (a restart replays at most `--snapshot-every` of log).
+  A failed snapshot (disk full) is logged, counted in `INFO`, and retried at
+  the next trigger, not sooner.
+- **Snapshots are not compressed**, and are written at full speed: no I/O
+  throttling to protect the log's fsync latency on a shared disk.
+- If both retained snapshots are unreadable *and* the log before them has been
+  compacted away, the server refuses to start. There is no partial recovery,
+  deliberately: baton would rather stop than silently forget jobs.
 
 ---
 
