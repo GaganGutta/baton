@@ -83,6 +83,8 @@ class LogWriter {
   // Hands the pending batch to the log thread. Cheap when nothing is pending.
   void flush();
   Lsn last_appended_lsn() const { return next_lsn_ - 1; }
+  // Bytes appended since this writer was opened (drives snapshot scheduling).
+  uint64_t appended_bytes() const { return appended_bytes_; }
   // Bytes appended but not yet committed: the backpressure signal.
   uint64_t backlog_bytes() const {
     return appended_bytes_ - committed_bytes_.load(std::memory_order_relaxed);

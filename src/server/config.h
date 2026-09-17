@@ -25,6 +25,9 @@ struct ServerConfig {
   FsyncPolicy fsync = FsyncPolicy::kAlways;
   DurationMs fsync_interval_ms = 100;
   uint64_t segment_size = uint64_t{64} << 20U;
+  // Take a snapshot (and compact the log) after this many bytes of log. 0: only
+  // when asked to with the SNAPSHOT command.
+  uint64_t snapshot_every_bytes = uint64_t{256} << 20U;
 
   size_t max_connections = 10'000;
   uint64_t max_log_backlog_bytes = uint64_t{64} << 20U;  // stop reading clients beyond this

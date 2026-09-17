@@ -68,6 +68,8 @@ std::string_view usage_text() {
          "                                           interval on power loss\n"
          "  --fsync-interval <duration>  for --fsync interval (default 100ms)\n"
          "  --segment-size <size>        log segment size (default 64m)\n"
+         "  --snapshot-every <size>      snapshot and compact after this much log (default\n"
+         "                               256m; 0 = only on the SNAPSHOT command)\n"
          "\n"
          "Network\n"
          "  --bind <address>             IPv4/IPv6 literal to listen on (default 127.0.0.1)\n"
@@ -136,6 +138,8 @@ Result<ParsedArgs> parse_args(std::span<const std::string_view> args) {
     } else if (flag == "--segment-size") {
       BATON_ASSIGN_OR_RETURN(config.segment_size, parse_size(value));
       if (config.segment_size < (uint64_t{1} << 16U)) return bad("--segment-size must be >= 64k");
+    } else if (flag == "--snapshot-every") {
+      BATON_ASSIGN_OR_RETURN(config.snapshot_every_bytes, parse_size(value));
     } else if (flag == "--max-connections") {
       BATON_ASSIGN_OR_RETURN(const uint64_t n, parse_size(value));
       if (n == 0) return bad("--max-connections must be positive");

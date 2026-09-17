@@ -78,7 +78,8 @@ void field(std::string& reply, std::string_view name, std::string_view value) {
 }  // namespace
 
 const Server::Command* Server::find_command(std::string_view upper_name) {
-  static constexpr std::array<Command, 20> kCommands = {{
+  static constexpr std::array<Command, 21> kCommands = {{
+      {"SNAPSHOT", 1, true, &Server::cmd_snapshot},
       {"DLQ.LIST", 2, true, &Server::cmd_dlq_list},
       {"DLQ.RETRY", 2, true, &Server::cmd_dlq_retry},
       {"DLQ.PURGE", 2, true, &Server::cmd_dlq_purge},
@@ -297,6 +298,18 @@ std::string Server::build_info(std::string_view section) const {
     line("recovered_torn_bytes", recovery_.torn_bytes_truncated);
     line("disk_low", disk_low_ ? 1 : 0);
     line("clock_jumps_detected", engine_->clock_jumps_detected());
+    line("recovered_from_snapshot_lsn", recovery_.snapshot_lsn);
+    line("recovery_snapshots_rejected", recovery_.snapshots_rejected);
+    line("snapshot_in_progress", snapshotter_->busy() || pending_snapshot_ ? 1 : 0);
+    line("snapshots_taken", snapshot_stats_.taken);
+    line("snapshots_failed", snapshot_stats_.failed);
+    line("last_snapshot_lsn", snapshot_stats_.last_lsn);
+    line("last_snapshot_bytes", snapshot_stats_.last_bytes);
+    line("last_snapshot_jobs", snapshot_stats_.last_jobs);
+    line("last_snapshot_pause_us", snapshot_stats_.last_pause_micros);
+    line("last_snapshot_write_ms", snapshot_stats_.last_write_micros / 1000);
+    line("log_segments_removed", snapshot_stats_.segments_removed);
+    line("log_bytes_since_snapshot", log_bytes() - log_bytes_at_last_snapshot_);
     out += "\r\n";
   }
   if (wanted("JOBS")) {
@@ -568,6 +581,22 @@ Server::Verdict Server::cmd_stats(Connection& c, Args args, std::string& reply) 
     for (const auto& [name, queue] : state_->queues()) {
       append_queue_stats(reply, name, queue.get(), c.resp3);
     }
+  }
+  return Verdict::kReplied;
+}
+
+// --- snapshots --------------------------------------------------------------------------------
+
+// Asks for a snapshot; it is taken in the background (INFO persistence shows
+// snapshot_in_progress and last_snapshot_lsn).
+Server::Verdict Server::cmd_snapshot(Connection& /*c*/, Args args, std::string& reply) {
+  if (args.size() != 1) {
+    syntax_error(reply, "usage: SNAPSHOT");
+  } else if (snapshotter_->busy() || pending_snapshot_) {
+    resp_error(reply, "STATE", "a snapshot is already in progress");
+  } else {
+    snapshot_requested_ = true;
+    resp_simple(reply, "OK");
   }
   return Verdict::kReplied;
 }

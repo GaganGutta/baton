@@ -4,15 +4,15 @@
 
 #include <algorithm>
 #include <array>
+#include <chrono>
 #include <format>
 #include <random>
 #include <utility>
 
 #include "common/check.h"
 #include "common/logging.h"
-#include "log/recovery.h"
 #include "net/socket.h"
-#include "state/records.h"
+#include "snapshot/recovery.h"
 
 namespace baton {
 namespace {
@@ -58,7 +58,9 @@ Server::Server(Private /*key*/, ServerConfig config, FileSystem& fs, const Clock
       started_at_(clock.mono_now()) {}
 
 Server::~Server() {
-  // The log thread calls wake() on commit; stop it before anything it touches goes away.
+  // The snapshot and log threads call wake(); stop both before anything they
+  // touch goes away.
+  snapshotter_.reset();
   if (log_) log_->stop();
 }
 
@@ -67,26 +69,16 @@ Status Server::open_storage() {
   BATON_RETURN_IF_ERROR(fs_.create_dir_if_missing(config_.dir));
   BATON_ASSIGN_OR_RETURN(dir_lock_, fs_.lock_dir(config_.dir));
 
+  // Newest loadable snapshot, then the log after it, through the same apply()
+  // the live path uses.
   const MonoTime started = clock_.mono_now();
-  state_ = std::make_unique<State>(config_.state);
-  state_->begin_replay();
-  const auto replay = [this](const LogRecordView& view) -> Status {
-    auto record = decode_record(view.type, view.payload);
-    if (!record.ok()) {
-      return Error{ErrorCode::kCorruption,
-                   std::format("LSN {}: {}", view.lsn, record.error().message())};
-    }
-    if (const Status applied = state_->apply(*record); !applied.ok()) {
-      return Error{ErrorCode::kCorruption,
-                   std::format("LSN {} does not fit the state rebuilt so far: {}", view.lsn,
-                               applied.error().message())};
-    }
-    return {};
-  };
-  BATON_ASSIGN_OR_RETURN(const RecoveredLog recovered,
-                         recover_log(fs_, config_.dir, LogRecoveryOptions{}, replay));
-  state_->set_now(clock_.wall_now(), clock_.mono_now());
-  state_->end_replay(config_.engine.lease_grace_ms);
+  BATON_ASSIGN_OR_RETURN(StateRecovery recovered_state,
+                         recover_state(fs_, config_.dir, config_.state, clock_.wall_now(),
+                                       clock_.mono_now(), config_.engine.lease_grace_ms));
+  state_ = std::move(recovered_state.state);
+  const RecoveredLog& recovered = recovered_state.log;
+  for (const SegmentInfo& segment : recovered.segments) log_bytes_at_startup_ += segment.size;
+  snapshot_stats_.last_lsn = recovered_state.snapshot.lsn;
 
   LogWriterOptions log_options;
   log_options.dir = config_.dir;
@@ -101,13 +93,20 @@ Status Server::open_storage() {
   engine_ = std::make_unique<Engine>(*state_, *sink_, clock_, config_.engine,
                                      std::random_device{}(), recovered.last_lsn);
 
+  snapshotter_ = std::make_unique<Snapshotter>(fs_, config_.dir, [this] { wake(); });
+
   recovery_ = RecoveryReport{.records_replayed = recovered.records_replayed,
                              .torn_bytes_truncated = recovered.torn_bytes_truncated,
                              .segments = recovered.segments.size(),
+                             .snapshot_lsn = recovered_state.snapshot.lsn,
+                             .snapshot_jobs = recovered_state.snapshot.jobs,
+                             .snapshots_rejected = recovered_state.snapshots_rejected,
                              .elapsed_ms = clock_.mono_now() - started};
-  BATON_INFO("server", "recovered dir={} records={} segments={} last_lsn={} jobs={} ms={}",
-             config_.dir, recovery_.records_replayed, recovery_.segments, recovered.last_lsn,
-             state_->job_count(), recovery_.elapsed_ms);
+  BATON_INFO("server",
+             "recovered dir={} snapshot_lsn={} log_records={} segments={} last_lsn={} jobs={} "
+             "ms={}",
+             config_.dir, recovery_.snapshot_lsn, recovery_.records_replayed, recovery_.segments,
+             recovered.last_lsn, state_->job_count(), recovery_.elapsed_ms);
   return {};
 }
 
@@ -179,6 +178,7 @@ Status Server::run() {
     // Everything this iteration logged goes to the log thread as one batch.
     log_->flush();
     release_durable_replies();
+    drive_snapshots();
     apply_backpressure();
     check_disk_space();
   }
@@ -532,6 +532,54 @@ void Server::apply_backpressure() {
   }
 }
 
+// Snapshots (docs/design.md 8.3): capture a copy of the state on this thread -
+// the only pause - then hand it to the snapshot thread once the log has
+// committed everything the copy contains.
+void Server::drive_snapshots() {
+  if (auto result = snapshotter_->take_result()) {
+    if (result->ok()) {
+      const SnapshotReport& report = **result;
+      ++snapshot_stats_.taken;
+      snapshot_stats_.last_lsn = report.info.lsn;
+      snapshot_stats_.last_bytes = report.info.bytes;
+      snapshot_stats_.last_jobs = report.info.jobs;
+      snapshot_stats_.last_write_micros = report.write_micros;
+      snapshot_stats_.segments_removed += report.compaction.segments_removed;
+      BATON_INFO(
+          "snapshot", "done lsn={} jobs={} bytes={} pause_us={} write_ms={} segments_removed={}",
+          report.info.lsn, report.info.jobs, report.info.bytes, snapshot_stats_.last_pause_micros,
+          report.write_micros / 1000, report.compaction.segments_removed);
+    } else {
+      // Not fatal: the log is still complete, the snapshot is an optimization.
+      ++snapshot_stats_.failed;
+      BATON_ERROR("snapshot", "failed: {}", result->error().to_string());
+    }
+  }
+
+  const bool idle = !snapshotter_->busy() && !pending_snapshot_;
+  const bool due = config_.snapshot_every_bytes != 0 &&
+                   log_bytes() - log_bytes_at_last_snapshot_ >= config_.snapshot_every_bytes;
+  if (idle && (snapshot_requested_ || due)) {
+    snapshot_requested_ = false;
+    log_bytes_at_last_snapshot_ = log_bytes();
+    if (engine_->last_lsn() > snapshot_stats_.last_lsn) {
+      const auto started = std::chrono::steady_clock::now();
+      pending_snapshot_ =
+          PendingSnapshot{.image = state_->capture_image(), .lsn = engine_->last_lsn()};
+      snapshot_stats_.last_pause_micros = std::chrono::duration_cast<std::chrono::microseconds>(
+                                              std::chrono::steady_clock::now() - started)
+                                              .count();
+    }
+  }
+
+  // A snapshot must never be ahead of the durable log.
+  if (pending_snapshot_ && !snapshotter_->busy() && committed_lsn_ >= pending_snapshot_->lsn) {
+    snapshotter_->start(std::move(pending_snapshot_->image), pending_snapshot_->lsn,
+                        clock_.wall_now());
+    pending_snapshot_.reset();
+  }
+}
+
 void Server::check_disk_space() {
   const MonoTime now = clock_.mono_now();
   if (now < next_disk_check_) return;
@@ -559,6 +607,8 @@ void Server::shutdown() {
     resp_null(reply, c->resp3);
     queue_reply(*c, reply);
   }
+  pending_snapshot_.reset();
+  snapshotter_->wait();       // let a snapshot that is being written finish
   log_->stop();               // flush, fsync, join: everything logged is now durable
   release_durable_replies();  // ...so every waiting reply may go
   connections_.clear();

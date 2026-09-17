@@ -695,6 +695,179 @@ TEST(ServerStartupTest, RefusesALogThatDoesNotFitTheStateMachine) {
   set_log_level(LogLevel::kInfo);
 }
 
+// --- snapshots and compaction ------------------------------------------------------------------
+
+// The value of one "name:value" line of INFO.
+std::string info_field(RespClient& c, std::string_view name) {
+  const std::string info = c.command({"INFO"});
+  const std::string key = "\n" + std::string(name) + ":";
+  const size_t at = info.find(key);
+  if (at == std::string::npos) return "<no such field>";
+  const size_t start = at + key.size();
+  return info.substr(start, info.find('\r', start) - start);
+}
+
+// Snapshots are written in the background; INFO is how anyone finds out.
+::testing::AssertionResult WaitForInfo(RespClient& c, std::string_view name,
+                                       std::string_view value) {
+  std::string last;
+  for (int attempt = 0; attempt < 2'000; ++attempt) {
+    last = info_field(c, name);
+    if (last == value) return ::testing::AssertionSuccess();
+    std::this_thread::sleep_for(std::chrono::milliseconds(5));
+  }
+  return ::testing::AssertionFailure() << name << " stayed at " << last << ", wanted " << value;
+}
+
+std::vector<std::string> files_with_prefix(SimFs& fs, std::string_view prefix) {
+  std::vector<std::string> names = fs.list_dir("data").value();
+  std::erase_if(names, [&](const std::string& name) { return !name.starts_with(prefix); });
+  return names;
+}
+
+class ServerSnapshotTest : public ServerTest {
+ protected:
+  ServerConfig config() const override {
+    ServerConfig c = ServerTest::config();
+    c.snapshot_every_bytes = 0;  // only on request: these tests decide when
+    return c;
+  }
+};
+
+TEST_F(ServerSnapshotTest, RestartRecoversFromTheSnapshotPlusTheLogAfterIt) {
+  RespClient c = connect();
+  for (int i = 1; i <= 100; ++i) {
+    ASSERT_EQ(c.command({"ENQUEUE", "q", "job-" + std::to_string(i)}), ":" + std::to_string(i));
+  }
+  ASSERT_TRUE(StartsWith(c.command({"RESERVE", "0", "60000", "q"}), "[:1, :1,"));
+  ASSERT_EQ(c.command({"ACK", "1", "1"}), "+OK");
+
+  ASSERT_EQ(c.command({"SNAPSHOT"}), "+OK");
+  ASSERT_TRUE(WaitForInfo(c, "snapshots_taken", "1"));
+  EXPECT_EQ(info_field(c, "last_snapshot_lsn"), "102") << "100 enqueues, a lease, an ack";
+  EXPECT_EQ(info_field(c, "last_snapshot_jobs"), "100");
+  EXPECT_EQ(info_field(c, "snapshot_in_progress"), "0");
+  EXPECT_EQ(c.command({"SNAPSHOT"}), "+OK") << "nothing new to snapshot is not an error";
+
+  // Six more records that only the log has.
+  ASSERT_TRUE(StartsWith(c.command({"RESERVE", "0", "60000", "q"}), "[:2, :2,"));
+  for (int i = 101; i <= 105; ++i) {
+    ASSERT_EQ(c.command({"ENQUEUE", "q", "job-" + std::to_string(i)}), ":" + std::to_string(i));
+  }
+
+  image_ = fs_.crash_image(CrashMode::kLoseUnsynced);
+  stop();
+  start(*image_);
+
+  RespClient after = connect();
+  EXPECT_EQ(info_field(after, "recovered_from_snapshot_lsn"), "102");
+  EXPECT_EQ(info_field(after, "recovered_records"), "6") << "only the tail is replayed";
+  EXPECT_NE(after.command({"STATUS", "1"}).find("$state, $succeeded"), std::string::npos);
+  EXPECT_NE(after.command({"STATUS", "2"}).find("$state, $leased"), std::string::npos);
+  EXPECT_NE(after.command({"STATUS", "77", "PAYLOAD"}).find("$payload, $job-77"),
+            std::string::npos);
+  EXPECT_NE(after.command({"STATUS", "105"}).find("$state, $ready"), std::string::npos);
+  EXPECT_EQ(after.command({"ENQUEUE", "q", "next"}), ":106");
+  EXPECT_EQ(after.command({"ACK", "2", "2"}), "+OK") << "the lease from the tail is intact";
+  EXPECT_TRUE(StartsWith(after.command({"RESERVE", "0", "60000", "q"}), "[:3, :3,"))
+      << "fencing tokens continue after a snapshot recovery";
+}
+
+// A snapshot that got ahead of the durable log would describe a state that a
+// power failure can still take back, and recovery would find a snapshot newer
+// than its log. The log is stalled here; snapshot files are not.
+TEST_F(ServerSnapshotTest, SnapshotIsNeverAheadOfTheDurableLog) {
+  RespClient c = connect();
+  ASSERT_EQ(c.command({"ENQUEUE", "q", "durable"}), ":1");
+
+  fs_.hold_syncs("wal-");
+  c.send({"ENQUEUE", "q", "written but not durable"});
+  c.send({"SNAPSHOT"});
+  EXPECT_TRUE(c.stays_silent(300));
+  EXPECT_TRUE(files_with_prefix(fs_, "snapshot-").empty())
+      << "a snapshot at LSN 2 was started while LSN 2 could still be lost";
+  {
+    const auto image = fs_.crash_image(CrashMode::kLoseUnsynced);
+    auto after_crash = Server::create(config(), *image, clock_);
+    ASSERT_TRUE(after_crash.ok()) << after_crash.error().to_string();
+    EXPECT_EQ((*after_crash)->recovery().snapshot_lsn, 0U);
+    EXPECT_EQ((*after_crash)->recovery().records_replayed, 1U);
+  }
+
+  fs_.release_syncs();
+  EXPECT_EQ(c.read_reply(), ":2");
+  EXPECT_EQ(c.read_reply(), "+OK");
+  ASSERT_TRUE(WaitForInfo(c, "snapshots_taken", "1"));
+  EXPECT_EQ(info_field(c, "last_snapshot_lsn"), "2");
+}
+
+// The point of writing snapshots on another thread: a slow snapshot costs the
+// clients nothing. Here the snapshot's fsync stalls; the log's does not.
+TEST_F(ServerSnapshotTest, TrafficContinuesWhileASnapshotIsBeingWritten) {
+  RespClient c = connect();
+  ASSERT_EQ(c.command({"ENQUEUE", "q", "a"}), ":1");
+
+  fs_.hold_syncs("snapshot-");
+  ASSERT_EQ(c.command({"SNAPSHOT"}), "+OK");
+  ASSERT_TRUE(WaitForInfo(c, "snapshot_in_progress", "1"));
+  EXPECT_EQ(c.command({"ENQUEUE", "q", "b"}), ":2");
+  EXPECT_TRUE(StartsWith(c.command({"RESERVE", "0", "60000", "q"}), "[:1, :1,"));
+  EXPECT_TRUE(StartsWith(c.command({"SNAPSHOT"}), "-STATE a snapshot is already in progress"));
+  EXPECT_EQ(info_field(c, "snapshots_taken"), "0");
+
+  fs_.release_syncs();
+  ASSERT_TRUE(WaitForInfo(c, "snapshots_taken", "1"));
+  EXPECT_EQ(info_field(c, "last_snapshot_lsn"), "1") << "the state as of the SNAPSHOT command";
+}
+
+class ServerAutoSnapshotTest : public ServerTest {
+ protected:
+  ServerConfig config() const override {
+    ServerConfig c = ServerTest::config();
+    c.segment_size = 16 * 1024;
+    c.snapshot_every_bytes = 64 * 1024;
+    return c;
+  }
+};
+
+// Left alone, the server snapshots as the log grows, deletes the segments it no
+// longer needs, keeps serving meanwhile - and a power failure at the end loses
+// nothing.
+TEST_F(ServerAutoSnapshotTest, LogIsCompactedInTheBackgroundAndNothingIsLost) {
+  RespClient c = connect();
+  const std::string padding(1'000, 'p');
+  constexpr int kJobs = 600;  // about 600 KB of log: several snapshot cycles
+  int finished = 0;
+  for (int i = 1; i <= kJobs; ++i) {
+    ASSERT_EQ(c.command({"ENQUEUE", "q", padding + std::to_string(i)}), ":" + std::to_string(i));
+    if (i % 3 == 0) {
+      const std::string id = std::to_string(++finished);  // oldest first; tokens count up too
+      ASSERT_TRUE(
+          StartsWith(c.command({"RESERVE", "0", "60000", "q"}), "[:" + id + ", :" + id + ","));
+      ASSERT_EQ(c.command({"ACK", id, id}), "+OK");
+    }
+  }
+  ASSERT_TRUE(WaitForInfo(c, "snapshot_in_progress", "0"));
+  EXPECT_GE(std::stoi(info_field(c, "snapshots_taken")), 3);
+  EXPECT_EQ(info_field(c, "snapshots_failed"), "0");
+  EXPECT_GT(std::stoi(info_field(c, "log_segments_removed")), 0);
+  EXPECT_LE(files_with_prefix(fs_, "snapshot-").size(), 2U);
+  EXPECT_FALSE(fs_.exists(join_path("data", segment_file_name(1)))) << "the log only ever grew";
+
+  image_ = fs_.crash_image(CrashMode::kLoseUnsynced);
+  stop();
+  start(*image_);
+
+  RespClient after = connect();
+  EXPECT_NE(info_field(after, "recovered_from_snapshot_lsn"), "0");
+  EXPECT_LT(std::stoi(info_field(after, "recovered_records")), kJobs);
+  EXPECT_EQ(info_field(after, "jobs_succeeded"), std::to_string(finished));
+  EXPECT_EQ(info_field(after, "jobs_ready"), std::to_string(kJobs - finished));
+  EXPECT_NE(after.command({"STATUS", "1"}).find("$state, $succeeded"), std::string::npos);
+  EXPECT_NE(after.command({"STATUS", "600", "PAYLOAD"}).find(padding + "600"), std::string::npos);
+  EXPECT_EQ(after.command({"ENQUEUE", "q", "next"}), ":" + std::to_string(kJobs + 1));
+}
+
 // --- backpressure ------------------------------------------------------------------------------
 
 class ServerBackpressureTest : public ServerTest {

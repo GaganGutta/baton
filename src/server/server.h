@@ -15,6 +15,7 @@
 #include <deque>
 #include <map>
 #include <memory>
+#include <optional>
 #include <string>
 #include <string_view>
 #include <unordered_map>
@@ -28,6 +29,7 @@
 #include "sched/timing_wheel.h"
 #include "server/config.h"
 #include "server/connection.h"
+#include "snapshot/snapshotter.h"
 #include "state/engine.h"
 #include "state/state.h"
 
@@ -44,7 +46,21 @@ struct RecoveryReport {
   uint64_t records_replayed = 0;
   uint64_t torn_bytes_truncated = 0;
   size_t segments = 0;
+  Lsn snapshot_lsn = 0;  // 0: recovered from the log alone
+  uint64_t snapshot_jobs = 0;
+  uint64_t snapshots_rejected = 0;
   DurationMs elapsed_ms = 0;
+};
+
+struct SnapshotStats {
+  uint64_t taken = 0;
+  uint64_t failed = 0;
+  Lsn last_lsn = 0;
+  uint64_t last_bytes = 0;
+  uint64_t last_jobs = 0;
+  int64_t last_pause_micros = 0;  // event-loop time spent copying the state
+  int64_t last_write_micros = 0;  // background time: serialize, write, fsync, compact
+  uint64_t segments_removed = 0;
 };
 
 class Server {
@@ -106,6 +122,7 @@ class Server {
   void flush(Connection& c);
   void apply_backpressure();
   void check_disk_space();
+  void drive_snapshots();
   void shutdown();
 
   // --- connections --------------------------------------------------------------------
@@ -142,6 +159,7 @@ class Server {
   Verdict cmd_dlq_list(Connection& c, Args args, std::string& reply);
   Verdict cmd_dlq_retry(Connection& c, Args args, std::string& reply);
   Verdict cmd_dlq_purge(Connection& c, Args args, std::string& reply);
+  Verdict cmd_snapshot(Connection& c, Args args, std::string& reply);
   // Shared by DLQ.RETRY and DLQ.PURGE: `<job_id>` or `<queue> ALL`.
   Verdict dlq_one_or_all(Args args, std::string& reply, bool purge);
 
@@ -193,6 +211,20 @@ class Server {
   std::vector<uint64_t> resume_;        // unparked connections with input left to process
   std::vector<uint64_t> paused_reads_;  // connections whose reads are paused for backpressure
   bool reads_paused_ = false;
+
+  // Snapshots (docs/design.md 8). Declared after the wake pipe: the snapshot
+  // thread writes to it when it finishes, so it must be destroyed first.
+  struct PendingSnapshot {
+    StateImage image;
+    Lsn lsn = 0;
+  };
+  std::unique_ptr<Snapshotter> snapshotter_;
+  std::optional<PendingSnapshot> pending_snapshot_;  // captured, waiting for the log to commit
+  bool snapshot_requested_ = false;
+  uint64_t log_bytes_at_startup_ = 0;        // log on disk when the server started
+  uint64_t log_bytes_at_last_snapshot_ = 0;  // in the same units as log_bytes()
+  SnapshotStats snapshot_stats_;
+  uint64_t log_bytes() const { return log_bytes_at_startup_ + log_->appended_bytes(); }
 
   bool disk_low_ = false;
   MonoTime next_disk_check_;

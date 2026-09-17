@@ -29,7 +29,7 @@ milestones are listed at the end.
 - [Authentication](#authentication)
 - [Job commands](#job-commands): ENQUEUE, RESERVE, HEARTBEAT, ACK, FAIL, CANCEL, STATUS, STATS
 - [Dead-letter queue](#dead-letter-queue): DLQ.LIST, DLQ.RETRY, DLQ.PURGE
-- [Connection and server commands](#connection-and-server-commands): PING, ECHO, AUTH, HELLO, INFO, QUIT, compatibility stubs
+- [Connection and server commands](#connection-and-server-commands): PING, ECHO, AUTH, HELLO, INFO, QUIT, SNAPSHOT, compatibility stubs
 - [Commands added by later milestones](#commands-added-by-later-milestones)
 
 ## Framing
@@ -312,11 +312,43 @@ Errors: `ERR`, `NOTFOUND`, `STATE` (the job is not dead).
 doc: `last_lsn`, `durable_lsn`, `log_batches`, `log_records`,
 `log_batch_records_avg`, `log_fsync_p99_us`, and so on.
 
+### SNAPSHOT
+
+```
+SNAPSHOT        → +OK
+```
+
+Asks the server to write a snapshot of its state and then delete the log
+segments that are no longer needed (design doc, section 8). The server also
+does this by itself after every `--snapshot-every` bytes of log (default 256
+MiB), so the command is for operators and tests: before a planned restart, to
+make the next startup fast, or with `--snapshot-every 0` to decide when
+snapshots happen.
+
+`+OK` means the request was accepted, not that the snapshot is finished: it is
+written in the background while the server keeps serving. Progress is visible
+in `INFO persistence`:
+
+| Field | Meaning |
+|---|---|
+| `snapshot_in_progress` | 1 while a snapshot is being captured or written |
+| `snapshots_taken`, `snapshots_failed` | since startup; a failed snapshot is logged and costs nothing but the attempt - the log is still complete |
+| `last_snapshot_lsn` | the snapshot covers every record up to this LSN |
+| `last_snapshot_bytes`, `last_snapshot_jobs` | its size |
+| `last_snapshot_pause_us` | how long the event loop stood still to copy the state |
+| `last_snapshot_write_ms` | how long the background write took |
+| `log_segments_removed` | log segments deleted by compaction since startup |
+| `log_bytes_since_snapshot` | what the next automatic snapshot is measured against |
+| `recovered_from_snapshot_lsn` | the snapshot this process started from (0: the log alone) |
+| `recovery_snapshots_rejected` | snapshots found unreadable at startup and skipped |
+
+If nothing has been logged since the last snapshot, `+OK` is returned and
+nothing is written. Errors: `STATE` if a snapshot is already in progress.
+
 ## Commands added by later milestones
 
 | Milestone | Commands |
 |---|---|
-| M5 | `SNAPSHOT` |
 | M9 | `WF.START`, `WF.HISTORY`, `WF.STEP`, `WF.SLEEP`, `WF.WAIT`, `WF.SIGNAL`, `WF.COMPLETE`, `WF.FAIL`, `WF.CANCEL`, `WF.STATUS` |
 | M10 | `CRON.ADD`, `CRON.DEL`, `CRON.LIST`, `QUEUE.LIMIT`, `ENQUEUE … UNIQUE` |
 
