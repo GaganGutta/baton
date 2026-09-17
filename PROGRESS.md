@@ -7,8 +7,8 @@ from here with no other context. Read `PLAN.md` for the task breakdown and
 ## Status
 
 - **Current milestone:** M8 (benchmarks, README, v0.1.0). M7 is done (the tmpfs for the chaos full-disk scenario must be re-mounted as root after every WSL reboot: see `chaos/README.md`)
-- **Last completed task:** chaos harness (`chaos/`, `tools/logcheck.cpp`, `src/check/lease_model.*`), which found and fixed two bugs: leases expired up to 1 ms early (`State::advance_timers`), and an unsound SDK inference about resent ACKs, fixed by making `ACK` idempotent for the completing token (protocol change, L14). `chaos/selftest.sh` plants bugs and requires rounds to fail
-- **Next task after M7:** M8. Already written, **uncompiled and untested**: `bench/loadgen/` (C++ load generator: baton, beanstalkd, faktory protocols; open- and closed-loop), `bench/micro/resp_bench.cpp`, `tests/unit/bench/latency_histogram_test.cpp`, `bench/run_all.py` + `.sh` (all README numbers), `bench/compare/` (Docker comparison; Faktory = RDB snapshots every 30 s, no fsync per job; Beanstalkd `-f 0` vs `-f 50`). Docker Desktop does not start here: install `docker.io` inside WSL as root instead. Then README, `docs/benchmarks.md`, tag `v0.1.0`
+- **Last completed task:** M8 measurements. `bench/loadgen` (baton/beanstalkd/faktory protocols, open and closed loop), `bench/run_all.sh`, `bench/compare/run_compare.sh` (Docker Engine installed inside WSL; Docker Desktop does not start on this machine) ran on commit `4f45de4`; results are quoted verbatim in `docs/benchmarks.md`, and the README's performance section quotes a subset. Design section 11 describes the methodology and its limits
+- **Next task:** finish M8. Run the quickstart end to end from a clean checkout (docker build from the GitHub URL, then `examples/quickstart`) and fix anything that does not work as written; run `scripts/check.sh` (includes the Python suites); confirm CI green; tick M8 in PLAN.md; tag `v0.1.0`. Then M9 (workflows): design notes are drafted in `.dev/m9-notes.md` and `.dev/design-m9.md` (gitignored scratch)
 
 ## Milestones
 
@@ -22,7 +22,7 @@ from here with no other context. Read `PLAN.md` for the task breakdown and
 | M5 Snapshots | **done** | 325 unit + 57 integration tests; 27/27 mutants killed; 7 fuzz targets; guarantees S1–S7. SimFs torn crashes now keep an arbitrary subset of unsynced directory operations, which found a real recovery bug (leftover segments behind the snapshot, design.md 8.4). Measured: pause 0.15 ms / 3.5 ms / 126 ms at 10k / 100k / 1M live jobs |
 | M6 Python SDK | **done** | 51 tests (`sdk/python/tests`, real binary): replies lost in transit via a dropping proxy, SIGKILLed and SIGTERMed worker processes, server restart under a running worker, racing and killed ledger writers; guarantees P1–P10. Run: `BATON_BIN=build/release/src/server/baton ~/baton-venv/bin/python -m pytest sdk/python/tests -q` |
 | M7 Chaos harness | **done** | `chaos/` (kill rounds, 5 invariants, 4 fault scenarios, `selftest.sh` with planted bugs), `baton-logcheck` + `LeaseModel` (independent offline lease check of the server's whole log); 346 unit tests, 29/29 mutants, 53 SDK tests; guarantees L14, C1–C6. Long run 2026-09-17: 40 rounds, 652 server kills, 232,682 acknowledged jobs, 0 violations (docs/testing.md). Found and fixed: leases expired ≤ 1 ms early; unsound SDK inference on resent ACKs → `ACK` idempotent for the completing token |
-| M8 Benchmarks + v0.1.0 | not started | |
+| M8 Benchmarks + v0.1.0 | in progress | benchmarks and comparison measured and documented; README written; remaining: quickstart verification, tag |
 | M9 Workflows | not started | |
 | M10 Scheduling | not started | |
 | M11 Observability | not started | |
