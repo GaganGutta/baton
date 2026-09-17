@@ -73,7 +73,7 @@ double median_ms(F&& run) {
   std::vector<double> samples;
   for (int i = 0; i < kSamples; ++i) {
     const Stopwatch watch;
-    const auto built = run();
+    [[maybe_unused]] const auto built = run();
     samples.push_back(watch.ms());
   }
   std::ranges::sort(samples);
