@@ -34,9 +34,22 @@ from a torn write and is repaired by truncation.
 
 ## Delivery and leases
 
+These are promises of the state machine (M2), checked at the `Engine` API. M3
+adds the promise that the wire protocol exposes them unchanged, M4 the rules
+for restarts and clock jumps. Tests live in `tests/unit/state/`.
+
 | # | Promise | Checked by |
 |---|---|---|
-| | *(filled in from M3/M4 onwards)* | |
+| L1 | **Replay equivalence.** A state rebuilt from the logged records alone — or from a serialized state plus the records after it — is byte-for-byte identical to the live state. `apply` uses nothing that is not in the record: no clock, no RNG, no configuration. | every `EngineTest` (the fixture checks it in `TearDown`), `StateModelTest.RandomTrafficKeepsInvariantsAndReplaysExactly` (12 seeds × 2,500 steps), `StateSerializationTest.*`; mutant "apply reads the clock instead of the record" |
+| L2 | **Fencing.** A job has at most one valid lease. Lease tokens increase server-wide and are never reused, including after a dead job is retried. | `EngineTest.TokensIncreaseAcrossJobsAndAttempts`, `StateModelTest`; mutant "lease token counter not advanced" |
+| L3 | **Zombies are rejected.** Once a lease has ended — expiry, completion or cancellation — its token can no longer `ACK`, `FAIL` or `HEARTBEAT` the job, whether or not the job has been leased again. The current holder is unaffected. | `EngineTest.ZombieWorkerIsFencedOffAfterItsLeaseExpires`, `.StaleTokenIsRejectedEvenBeforeTheJobIsLeasedAgain`, `.CancelWorksInEveryLiveState`, `StateModelTest`; mutant "engine accepts a stale lease token" |
+| L4 | **Heartbeats extend leases**; without one the lease expires on time. An expiry is a logged fact that consumes an attempt and can dead-letter the job. | `EngineTest.HeartbeatKeepsALeaseAlive`, `.LeaseExpiryConsumesAnAttemptAndCanKillTheJob` |
+| L5 | **Retries** use exponential backoff with full jitter, capped: the delay is uniform in `[0, min(cap, base·2^(attempt−1))]`, drawn once and logged. After `max_attempts` leases the job moves to the dead-letter queue. `NORETRY` and `RETRY_IN` override. | `EngineTest.JitterIsFullAndStaysWithinBounds`, `.BackoffCeilingDoublesAndIsCapped`, `.ExhaustedAttemptsSendTheJobToTheDeadLetterQueue`, `.NoRetryAndRetryInOverrideTheBackoff`; mutant "attempts never counted" |
+| L6 | **Delayed jobs** are never handed out before `run_at`; ready jobs are handed out by priority, then FIFO. | `EngineTest.DelayedJobIsHandedOutOnlyAfterItsDelay`, `.ReserveFollowsPriorityThenFifo`, `.ReserveChecksQueuesInTheOrderGiven`; mutant "ready order ignores priority" |
+| L7 | **Idempotent enqueue.** Within the idempotency window one key maps to one job — even after that job has finished and been collected — and a duplicate logs nothing. After the window the key counts as absent, whether or not it has been physically collected. | `EngineTest.SameKeyReturnsTheSameJobWithinTheWindow`, `.KeyStillMatchesAfterTheJobFinishedAndWasCollected`, `.KeyExpiresAfterTheWindow`, `.ExpiredKeyCountsAsAbsentEvenBeforeItIsCollected`, `StateModelTest`; mutants "idempotency window never expires", "idempotency key not recorded" |
+| L8 | **A record that does not fit the state is rejected and changes nothing**, so recovery refuses a log that disagrees with the code instead of guessing. | `StateTest.RecordsThatDoNotFitAreRejectedAndChangeNothing`; fuzz target `fuzz_state_apply` |
+| L9 | **Limits are errors, not degradation.** An oversized payload or a full `max-memory` budget is refused with a clear error and logs nothing; enqueue works again once memory is freed. | `EngineTest.EnqueueRejectsBadInputWithoutLoggingAnything`, `EngineMemoryLimitTest.EnqueueFailsClearlyAtTheLimitAndRecoversWhenMemoryIsFreed` |
+| L10 | **Structural invariants** hold after every operation: each job is in exactly the index its state implies, counts match a recount, the heap property holds, a timer exists exactly when one is needed, the memory estimate equals a recomputation. | `State::check_invariants()` after every step of `StateModelTest` and after every `EngineTest` |
 
 ## Workflows
 

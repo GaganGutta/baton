@@ -646,6 +646,41 @@ jobs. One rebuild path serves restart and clock jumps alike.
 - **Logging GC.** Deterministic physical state, but one more record per job
   for something no client can observe.
 
+### 5.11 Known limitations (recorded after implementation)
+
+- **Handlers validate, `apply` re-validates.** Every `apply_record` checks its
+  preconditions before mutating, so a rejected record leaves the state untouched
+  (`StateTest.RecordsThatDoNotFitAreRejectedAndChangeNothing`, `fuzz_state_apply`).
+  The engine applies a record *before* appending it to the log: if a handler
+  ever produced a record that does not fit, the process stops without the bad
+  record reaching disk, instead of bricking the data directory.
+- **The engine's clock is sampled once per `tick()`**, i.e. once per event-loop
+  iteration. All commands handled in one iteration see the same timestamp.
+- **Collection can lag, visibility cannot.** Garbage collection pops from the
+  front of insertion-ordered queues and stops at the first entry that is not
+  yet due. If the idempotency window or a retention period is changed between
+  restarts, or the wall clock is stepped, an older long-lived entry can delay
+  the physical removal of expired ones behind it. Handlers compare timestamps,
+  so nothing expired is ever *visible*
+  (`EngineTest.ExpiredKeyCountsAsAbsentEvenBeforeItIsCollected` — a test that
+  exists because the mutation check showed the comparison was otherwise
+  untested).
+- **The idempotency window is server-wide**, not per job. The expiry is stored
+  per entry, so changing the setting never rewrites history.
+- **Ties in the ready order go to the lower job id.** A job retried with
+  `RETRY_IN 0` re-enters the queue with the same millisecond `run_at` as work
+  enqueued in that millisecond and sorts before higher ids.
+- **Timestamps outside `[0, 2^50]` ms are rejected by the decoders**, so a
+  damaged but checksummed record can never cause signed overflow in time
+  arithmetic.
+- **The memory estimate is an estimate** (fixed per-node overheads). M8 measures
+  it against RSS.
+- **Jitter values are not portable across standard libraries**
+  (`std::uniform_int_distribution` is implementation-defined). Irrelevant to
+  correctness: the drawn value is logged, never re-drawn.
+- `DeadJobRetried` and `JobsPurged` are applied and tested here; the commands
+  that produce them (`DLQ.RETRY`, `DLQ.PURGE`) arrive with M4.
+
 ---
 
 ## Credits

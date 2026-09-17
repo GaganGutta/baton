@@ -59,15 +59,16 @@ Conventions used below:
 - [x] Update design (limitations), guarantees, PROGRESS; CI green; push.
 
 ### M2. State machine
-- [ ] Design section: job model, records (the "facts" vocabulary), apply rules, queue ordering `(priority desc, run_at asc, id asc)`, idempotency index semantics, invisible GC rules (key expiry, finished-job retention), memory accounting, timing wheel.
-- [ ] `sched/timing_wheel`: hierarchical (6 levels × 64 slots, 1 ms tick), slab-backed intrusive lists, O(1) insert/cancel, occupancy bitmaps for `next_expiry()` so the loop sleeps exactly as long as needed; cascading; far-future clamp.
-- [ ] `state/job`, `state/job_store`, `state/ready_queue` (indexed binary heap with O(log n) arbitrary removal), `state/idempotency_index`.
-- [ ] `state/records`: encode/decode for every record type, versioned.
-- [ ] `state/state.apply(record)`: the single mutation path. Pure with respect to clock/RNG.
-- [ ] `state/backoff`: exponential backoff with full jitter and cap (RNG injected; result goes in the record).
-- [ ] Invariant checker (`State::check_invariants`) used by tests: every job in exactly one index, counters match, heap property, timers match states.
-- [ ] Tests: per-transition unit tests; timing wheel vs. a naive reference model (randomized); **model-based test**: random command sequences, after every step check invariants; **replay equivalence**: canonical dump of live state == state rebuilt by replaying the records.
-- [ ] Microbenchmarks wired up (timing wheel, heap) — numbers reported in M8.
+- [x] Design section: job model, records (the "facts" vocabulary), apply rules, queue ordering `(priority desc, run_at asc, id asc)`, idempotency index semantics, invisible GC rules (key expiry, finished-job retention), memory accounting, timing wheel.
+- [x] `sched/timing_wheel`: hierarchical (6 levels × 64 slots, 1 ms tick), slab-backed intrusive lists, O(1) insert/cancel, occupancy bitmaps for `next_expiry()` so the loop sleeps exactly as long as needed; cascading; far-future clamp.
+- [x] `state/job`, `state/job_store`, `state/ready_queue` (indexed binary heap with O(log n) arbitrary removal), `state/idempotency_index`.
+- [x] `state/records`: encode/decode for every record type, versioned.
+- [x] `state/state.apply(record)`: the single mutation path. Pure with respect to clock/RNG.
+- [x] `state/backoff`: exponential backoff with full jitter and cap (RNG injected; result goes in the record).
+- [x] Invariant checker (`State::check_invariants`) used by tests: every job in exactly one index, counters match, heap property, timers match states.
+- [x] Tests: per-transition unit tests; timing wheel vs. a naive reference model (randomized); **model-based test**: random command sequences, after every step check invariants; **replay equivalence**: canonical dump of live state == state rebuilt by replaying the records.
+- [x] Microbenchmarks wired up (timing wheel, heap) — numbers reported in M8.
+- [x] `state/engine`: command logic (validate → resolve nondeterminism → apply → log) behind a `RecordSink`; fuzz targets `fuzz_record_decode`, `fuzz_state_apply`, `fuzz_state_deserialize`; 7 state-machine mutants added to `scripts/mutation-check.sh`.
 - [ ] Update docs; CI green; push.
 
 ### M3. Networking

@@ -6,9 +6,9 @@ from here with no other context. Read `PLAN.md` for the task breakdown and
 
 ## Status
 
-- **Current milestone:** M2 (state machine) — next
-- **Last completed task:** M1 durable log: code, tests, fuzz targets, mutation check, docs
-- **Next task:** M2 design section in `docs/design.md`, then timing wheel → job store → records → `apply()`
+- **Current milestone:** M3 (networking) — next
+- **Last completed task:** M2 state machine: timing wheel, jobs/queues/idempotency, records, `State::apply`, `Engine`, model-based tests, fuzzers, mutants, docs
+- **Next task:** write `docs/protocol.md`, then the M3 design section, then poller → RESP parser (+ fuzz) → connection/reply gating → server wiring
 
 ## Milestones
 
@@ -16,7 +16,7 @@ from here with no other context. Read `PLAN.md` for the task breakdown and
 |---|---|---|
 | M0 Scaffold | **done** | CI: gcc-14 + clang-18 (release, asan), tsan, tidy (LLVM 21), macOS, Docker |
 | M1 Durable log | **done** | 140 tests under ASan+UBSan and TSan; 6/6 mutants killed; 2 fuzz targets; guarantees D1–D9 |
-| M2 State machine | not started | |
+| M2 State machine | **done** | 210 tests; model-based test with replay equivalence; 13/13 mutants killed; 5 fuzz targets; guarantees L1–L10. Layers: `Engine` (commands, only reader of clock/RNG) → `State::apply(record)` → `RecordSink` |
 | M3 Networking | not started | |
 | M4 Leases/retries/DLQ | not started | |
 | M5 Snapshots | not started | |

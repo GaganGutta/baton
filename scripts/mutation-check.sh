@@ -23,6 +23,13 @@ mutants=(
   "torn tail not truncated|src/log/recovery.cpp|s,        BATON_RETURN_IF_ERROR(fs.truncate(path\, offset));,        // mutant,|tests/unit/log_test"
   "mid-log damage treated as a torn tail|src/log/recovery.cpp|s,        if (valid_record_follows(data\, offset + 1\, expected_lsn)) {,        if (false) {,|tests/unit/log_test"
   "record checksum not verified|src/log/format.cpp|s,  if (load_u32(encoded\, 4) != record_crc(encoded.substr(0\, 4)\, encoded.substr(8))) {,  if (false) {,|tests/unit/log_test"
+  "engine accepts a stale lease token|src/state/engine.cpp|s,  if (job->lease_token != token) {,  if (false) {,|tests/unit/state_test"
+  "apply reads the clock instead of the record|src/state/state.cpp|s,  finish(\*job\, JobState::kSucceeded\, r.at);,  finish(*job\, JobState::kSucceeded\, wall_now_);,|tests/unit/state_test"
+  "lease token counter not advanced|src/state/state.cpp|s,  next_token_ = r.token + 1;,  // mutant,|tests/unit/state_test"
+  "attempts never counted|src/state/state.cpp|s,  ++job->attempts;,  // mutant,|tests/unit/state_test"
+  "ready order ignores priority|src/state/ready_heap.cpp|s,  if (a.priority != b.priority) return a.priority > b.priority;,  // mutant,|tests/unit/state_test"
+  "idempotency window never expires|src/state/engine.cpp|s,    if (entry != nullptr && entry->expires_at > now) {,    if (entry != nullptr) {,|tests/unit/state_test"
+  "idempotency key not recorded|src/state/state.cpp|s,  if (!r.idem_key.empty()) upsert_idem(r.idem_key\, r.id\, r.idem_expires_at);,  // mutant,|tests/unit/state_test"
 )
 
 rsync -a --exclude build --exclude .git ./ "$work/src/"
@@ -34,12 +41,14 @@ build_and_test() {  # $1 = test binary; returns 0 if the tests pass
 }
 
 echo "baseline:"
-if build_and_test tests/unit/log_test; then
-  echo "  ok: tests pass on the unmodified tree"
-else
-  echo "  ERROR: tests do not pass on the unmodified tree"
-  exit 2
-fi
+for binary in tests/unit/log_test tests/unit/state_test; do
+  if build_and_test "$binary"; then
+    echo "  ok: $(basename "$binary") passes on the unmodified tree"
+  else
+    echo "  ERROR: $(basename "$binary") does not pass on the unmodified tree"
+    exit 2
+  fi
+done
 
 survivors=0
 for mutant in "${mutants[@]}"; do

@@ -53,6 +53,23 @@ LSNs are contiguous, and the repaired log accepts new writes. `SimFs` has its
 own tests (`tests/unit/testing/`), because a simulator that is too forgiving
 would make everything built on it meaningless.
 
+## Model-based testing of the state machine
+
+`tests/unit/state/model_test.cpp` drives the `Engine` with long random command
+sequences shaped like real traffic — several queues, priorities, delays,
+duplicate idempotency keys, workers that ack, fail, heartbeat, go silent, and
+come back as zombies — for 12 seeds × 2,500 steps. Three layers of checking:
+
+1. **After every step**, `State::check_invariants()`.
+2. **A tiny client-side model** asserts the contract: tokens only increase; only
+   the current token can act on a job; a key maps to one job for its window.
+3. **Periodically, replay equivalence**: a fresh `State` rebuilt from the logged
+   records must serialize to the same bytes as the live one — and so must a
+   state deserialized from a mid-run "snapshot" plus the records after it.
+
+Every `EngineTest` also runs checks 1 and 3 in its `TearDown`, so each
+behavioural test doubles as a recovery test.
+
 ## Mutation check: testing the tests
 
 A durability test that cannot fail proves nothing. `scripts/mutation-check.sh`
@@ -67,8 +84,21 @@ suite to fail each time:
 | torn tail not truncated | D3 |
 | mid-log damage treated as a torn tail | D4 |
 | record checksum not verified | D4, D5 |
+| engine accepts a stale lease token | L3 |
+| apply reads the clock instead of the record | L1 |
+| lease token counter not advanced | L2 |
+| attempts never counted | L5 |
+| ready order ignores priority | L6 |
+| idempotency window never expires | L7 |
+| idempotency key not recorded | L7 |
 
-Last run: 2026-09-17, all six killed.
+Last run: 2026-09-17, all 13 killed.
+
+The check earns its keep: on its first run against the state machine, "idempotency
+window never expires" **survived**. The expiry comparison in `ENQUEUE` was
+correct but untested, because garbage collection always removed expired keys
+before the handler could see them. The comparison only matters when collection
+lags (section 5.11 of the design doc), so a test for exactly that case was added.
 
 ## Fuzz targets
 
@@ -76,6 +106,10 @@ Last run: 2026-09-17, all six killed.
 |---|---|---|
 | `fuzz_log_segment` | arbitrary bytes as the newest log segment | no crash or sanitizer report; delivered LSNs are contiguous; a repair is idempotent |
 | `fuzz_log_damage` | a program of damage operations (bit flips, truncation, garbage, deleted segments) applied to a valid multi-segment log | recovery either refuses or delivers an intact prefix of the original records — never a damaged record, never one out of order |
+
+| `fuzz_record_decode` | a type byte and a record payload | decoding never crashes or over-allocates; whatever decodes re-encodes to a stable form |
+| `fuzz_state_apply` | a sequence of records, as recovery would read them from a checksummed but hostile log | `apply` accepts a record or rejects it *and changes nothing*; afterwards all invariants hold and the state survives a serialize/deserialize round trip |
+| `fuzz_state_deserialize` | arbitrary bytes as a serialized state (the body of a snapshot) | rejected, or loads into a state whose invariants hold and that re-serializes |
 
 `fuzz_log_damage` is structure-aware because raw-byte fuzzing cannot get past
 the record checksums. Its garbage comes from a PRNG seeded by the input rather
