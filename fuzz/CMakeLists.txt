@@ -18,7 +18,10 @@ baton_add_fuzzer(fuzz_resp_parser SOURCES resp_parser_fuzz.cpp LIBS baton_net)
 baton_add_fuzzer(fuzz_record_decode SOURCES record_decode_fuzz.cpp LIBS baton_state)
 baton_add_fuzzer(fuzz_state_apply SOURCES state_apply_fuzz.cpp LIBS baton_state)
 baton_add_fuzzer(fuzz_state_deserialize SOURCES state_deserialize_fuzz.cpp LIBS baton_state)
+baton_add_fuzzer(fuzz_snapshot_load SOURCES snapshot_load_fuzz.cpp
+                 LIBS baton_snapshot baton_testing)
 
 # Writes seed inputs so the fuzzers start from valid structures.
 add_executable(fuzz_make_seeds make_seeds.cpp)
-target_link_libraries(fuzz_make_seeds PRIVATE baton_log baton_state baton_options)
+target_link_libraries(fuzz_make_seeds
+                      PRIVATE baton_log baton_snapshot baton_state baton_testing baton_options)

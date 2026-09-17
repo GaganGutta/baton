@@ -6,8 +6,10 @@
 # the unmodified copy). A surviving mutant means a rule is not actually tested.
 #
 #   scripts/mutation-check.sh            # all mutants
+#   scripts/mutation-check.sh snapshot   # only mutants whose name contains "snapshot"
 #
-# Takes a few minutes; run it after touching src/log or its tests.
+# Takes a while; run it after touching the storage, state or server code or
+# their tests.
 set -uo pipefail
 cd "$(dirname "$0")/.."
 
@@ -33,10 +35,17 @@ mutants=(
   "replies sent before their records are durable|src/server/server.cpp|s,  if (c.marks.empty() && lsn <= committed_lsn_) {,  if (true) {,|tests/unit/server_test"
   "parked RESERVEs served newest first|src/server/server.cpp|s,      Connection\* c = find(it->second.front());,      Connection* c = find(it->second.back());,|tests/unit/server_test"
   "commands allowed without AUTH|src/server/server.cpp|s,    } else if (command->needs_auth && !c.authenticated) {,    } else if (false) {,|tests/unit/server_test"
-  "restart expires leases without a grace period|src/server/server.cpp|s,  state_->end_replay(config_.engine.lease_grace_ms);,  state_->end_replay(0);,|tests/unit/server_test"
+  "restart expires leases without a grace period|src/server/server.cpp|s,clock_.mono_now()\, config_.engine.lease_grace_ms));,clock_.mono_now()\, 0));,|tests/unit/server_test"
   "wall-clock jumps go unnoticed|src/state/engine.cpp|s,  if (std::abs(change) <= options_.clock_jump_threshold_ms) return;,  if (true) return;,|tests/unit/state_test"
   "clock jump expires leases without a grace period|src/state/engine.cpp|s,  state_.rebuild_derived(options_.lease_grace_ms);,  state_.rebuild_derived(0);,|tests/unit/state_test"
   "DLQ retry keeps the spent attempts|src/state/state.cpp|s,  job->attempts = 0;,  // mutant,|tests/unit/state_test"
+  "snapshot renamed into place without fsync|src/snapshot/snapshot.cpp|s,  if (written.ok()) written = file->sync();,  // mutant,|tests/unit/snapshot_test"
+  "snapshot rename not made durable|src/snapshot/snapshot.cpp|s,^  BATON_RETURN_IF_ERROR(fs.sync_dir(dir));,  // mutant,|tests/unit/snapshot_test"
+  "log compacted on the strength of the newest snapshot|src/snapshot/snapshot.cpp|s,    const Lsn covered = snapshots\[kSnapshotKeepCount - 1\];,    const Lsn covered = snapshots[0];,|tests/unit/snapshot_test"
+  "snapshot end-chunk totals not checked|src/snapshot/snapshot.cpp|s,          jobs != builder.jobs_added() .. keys != builder.idem_added()) {,          false) {,|tests/unit/snapshot_test"
+  "snapshot chunk sequence not checked|src/snapshot/snapshot.cpp|s,    if (parsed.record.lsn != expected_sequence) {,    if (false) {,|tests/unit/snapshot_test"
+  "snapshot started before the log is durable up to it|src/server/server.cpp|s,  if (pending_snapshot_ && !snapshotter_->busy() && committed_lsn_ >= pending_snapshot_->lsn) {,  if (pending_snapshot_ \&\& !snapshotter_->busy()) {,|tests/unit/server_test"
+  "leftover segments behind the snapshot are validated|src/log/recovery.cpp|s,    if (files\[i\].name_lsn <= options.replay_after + 1) first_needed = i;,    // mutant,|tests/unit/log_test"
 )
 
 rsync -a --exclude build --exclude .git ./ "$work/src/"
@@ -53,7 +62,8 @@ build_and_test() {  # $1 = test binary; returns 0 if the tests pass
 }
 
 echo "baseline:"
-for binary in tests/unit/log_test tests/unit/state_test tests/unit/server_test; do
+for binary in log_test state_test snapshot_test server_test; do
+  binary="tests/unit/$binary"
   if build_and_test "$binary"; then
     echo "  ok: $(basename "$binary") passes on the unmodified tree"
   else
@@ -62,9 +72,11 @@ for binary in tests/unit/log_test tests/unit/state_test tests/unit/server_test; 
   fi
 done
 
+filter="${1:-}"
 survivors=0
 for mutant in "${mutants[@]}"; do
   IFS='|' read -r name file expr binary <<<"$mutant"
+  case "$name" in *"$filter"*) ;; *) continue ;; esac
   cp "$work/src/$file" "$work/original"
   sed -i.bak "$expr" "$work/src/$file"
   if cmp -s "$work/src/$file" "$work/original"; then

@@ -10,9 +10,11 @@
 
 #include "common/clock.h"
 #include "log/format.h"
+#include "snapshot/snapshot.h"
 #include "state/engine.h"
 #include "state/state.h"
 #include "testing/memory_record_sink.h"
+#include "testing/sim_fs.h"
 
 namespace {
 
@@ -52,6 +54,29 @@ std::string segment_with_records(int count) {
                          "payload-" + std::to_string(i));
   }
   return data;
+}
+
+// A snapshot of `state` as bytes, and the same chunks in the framed form that
+// fuzz_snapshot_load's structured mode takes: [type u8][length u16][payload].
+std::pair<std::string, std::string> snapshot_seeds(const baton::State& state) {
+  baton::SimFs fs;
+  (void)fs.create_dir_if_missing("d");
+  (void)baton::write_snapshot(fs, "d", state.capture_image(), 7, baton::WallTime{1});
+  const std::string file = fs.read_file("d/" + baton::snapshot_file_name(7)).value();
+
+  std::string chunks;
+  size_t offset = baton::kSnapshotHeaderSize;
+  while (offset < file.size()) {
+    const auto parsed = baton::parse_record(std::string_view(file).substr(offset));
+    if (parsed.status != baton::RecordParseStatus::kOk) break;
+    const std::string_view payload = parsed.record.payload;
+    chunks.push_back(static_cast<char>(parsed.record.type));
+    chunks.push_back(static_cast<char>(payload.size() & 0xFFU));
+    chunks.push_back(static_cast<char>((payload.size() >> 8U) & 0xFFU));
+    chunks += payload;
+    offset += parsed.size;
+  }
+  return {file, chunks};
 }
 
 }  // namespace
@@ -117,5 +142,11 @@ int main(int argc, char** argv) {
     baton::State().serialize(empty);
     return empty;
   }());
+
+  const auto [snapshot_file, snapshot_chunks] = snapshot_seeds(state);
+  write_seed(root / "fuzz_snapshot_load", "seed-file", std::string(1, '\0') + snapshot_file);
+  write_seed(root / "fuzz_snapshot_load", "seed-chunks", "\x01" + snapshot_chunks);
+  const auto [empty_file, empty_chunks] = snapshot_seeds(baton::State());
+  write_seed(root / "fuzz_snapshot_load", "seed-empty-chunks", "\x01" + empty_chunks);
   return 0;
 }
