@@ -136,6 +136,30 @@ TEST_F(RecoveryTest, LogMayStartAfterLsnOneIfTheSnapshotCoversTheGap) {
   expect_seen(56, 60);
 }
 
+// Segments that lie entirely within what a snapshot covers are leftovers of
+// compaction. A crash can persist only some of a batch of deletions, so the
+// leftovers may even have gaps between them; they must be ignored, not
+// validated. (Found by the snapshot crash tests under SimFs's torn model.)
+TEST_F(RecoveryTest, LeftoverSegmentsCoveredByTheSnapshotAreIgnored) {
+  put_segment(1, 3);
+  // [4,6] was deleted by compaction, [1,3] and [7,9] survived the crash.
+  put_segment(7, 9);
+  put_segment(10, 15);
+  const auto recovered = recover(/*replay_after=*/12);
+  ASSERT_TRUE(recovered.ok()) << recovered.error().to_string();
+  EXPECT_EQ(recovered->last_lsn, 15U);
+  expect_seen(13, 15);
+  ASSERT_EQ(recovered->segments.size(), 1U) << "only the segment that is needed is touched";
+  EXPECT_EQ(recovered->segments[0].first_lsn, 10U);
+
+  // Garbage in a leftover does not matter either...
+  fs_.write_file(path_for(7), "not a segment at all");
+  EXPECT_TRUE(recover(/*replay_after=*/12).ok());
+  // ...but without a snapshot to cover it, the same gap is fatal, as ever.
+  fs_.write_file(path_for(7), make_segment(7, 9));
+  expect_refused(recover(/*replay_after=*/0), "should start at LSN 4");
+}
+
 TEST_F(RecoveryTest, EmptyLogAfterSnapshotContinuesFromTheSnapshot) {
   const auto recovered = recover(/*replay_after=*/100);
   ASSERT_TRUE(recovered.ok());

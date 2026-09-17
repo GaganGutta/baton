@@ -66,7 +66,18 @@ Result<RecoveredLog> recover_log(FileSystem& fs, const std::string& dir,
   RecoveredLog recovered;
   Lsn expected_lsn = 0;  // LSN the next record must carry; 0 until the first segment is read
 
+  // Start at the last segment that begins at or before the first LSN we need.
+  // Every segment before it lies entirely within what the snapshot covers: it
+  // is garbage that compaction has not removed yet, or has only partly removed
+  // (a crash may persist some of a batch of unlinks and not others, so such
+  // leftovers can even have gaps between them). They are neither needed nor
+  // validated.
+  size_t first_needed = 0;
   for (size_t i = 0; i < files.size(); ++i) {
+    if (files[i].name_lsn <= options.replay_after + 1) first_needed = i;
+  }
+
+  for (size_t i = first_needed; i < files.size(); ++i) {
     const SegmentFile& file = files[i];
     const bool is_last = i + 1 == files.size();
     const std::string path = join_path(dir, file.name);
