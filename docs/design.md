@@ -17,6 +17,7 @@ Contents:
 7. [M4 — Leases, retries, time and the dead-letter queue](#7-m4--leases-retries-time-and-the-dead-letter-queue)
 8. [M5 — Snapshots and log compaction](#8-m5--snapshots-and-log-compaction)
 9. [M6 — The Python SDK](#9-m6--the-python-sdk)
+10. [M7 — The chaos harness](#10-m7--the-chaos-harness)
 
 ---
 
@@ -551,7 +552,20 @@ writes itself ("reject any write carrying a token lower than one I have seen").
 otherwise** — validity is state, not a clock comparison. An `ACK` that arrives
 after the nominal expiry but before the expiry was processed is accepted:
 nobody else has been given the job, so accepting it is both safe and the most
-useful answer. This also removes a whole class of clock-skew arguments.
+useful answer. This also removes a whole class of clock-skew arguments. The
+other direction is a hard rule: a lease is never expired *before* its recorded
+wall-clock expiry, even if the monotonic timer fires early (added in M7, when
+the chaos harness's log checker found expiries dated a millisecond too soon).
+
+**`ACK` is idempotent for the token that completed the job** (added in M7). A
+succeeded job keeps the token of the lease that completed it; dead and
+cancelled jobs keep none. Repeating that `ACK` answers `OK` and logs nothing;
+any other token is `STALE`. The reason is the one failure a client cannot
+resolve by itself: the connection dies after `ACK` was sent. On retry, `STALE`
+used to mean either "your first `ACK` worked" or "you lost the job, and
+whoever got it may have finished it" — and `STATUS` says `succeeded` in both
+cases. With this rule the retry's answer is exact. It costs nothing in the log
+and eight bytes that the job had anyway.
 
 ### 5.5 Idempotent enqueue
 
@@ -1255,7 +1269,8 @@ the command, and the rule is: **retry only when a duplicate is impossible.**
 |---|---|
 | `ENQUEUE` with a `key` | Retried on a fresh connection. The idempotency key makes the second attempt return the first one's job id. |
 | `ENQUEUE` without a key | **Not retried.** `EnqueueUncertain` is raised: the job may or may not exist, and only the caller knows whether a duplicate or a loss is worse. The message says so and points at `key=`. |
-| `ACK`, `FAIL`, `HEARTBEAT` | Retried. If the first attempt did run, the retry answers `STALE`; for `ACK` the SDK then asks `STATUS`, and `succeeded` means the ack went through. Anything else means the lease really is gone. |
+| `ACK` | Retried. The server answers `OK` again to the one token whose `ACK` completed the job and `STALE` to any other, so the retry's answer is exact: `OK` means this worker's `ACK` counted. (The first version inferred that from `STATUS` instead, and the chaos harness caught it being wrong: section 10.6.) |
+| `FAIL`, `HEARTBEAT` | Retried. A `HEARTBEAT` that ran twice is harmless; a `FAIL` that already ran makes the retry answer `STALE`, which the worker treats like any lost lease: the attempt is over either way. |
 | `RESERVE` | Retried by the worker loop. A job leased to a connection that died before the reply arrived is delivered again when its lease expires — at-least-once absorbs it (the server-side fix is on the roadmap). |
 | reads | Retried. |
 
@@ -1407,6 +1422,138 @@ SDK refuses to guess.
   should rotate it (for instance one ledger per month, keyed by job id).
 - **Shutdown while the server is unreachable** can take up to the reserve
   timeout plus the client's retry window before the worker threads notice.
+
+## 10. M7 — The chaos harness
+
+Unit tests prove rules one at a time, against a simulated disk. The chaos
+harness asks the question the README's headline rests on, end to end, with
+real processes, real sockets, a real file system and `kill -9`: *does the whole
+system keep its promises while things die?* It lives in `chaos/`, is written in
+Python on top of the SDK (so the SDK is under test too), and has two parts:
+randomized **kill rounds** checked against five invariants, and four
+deterministic **fault scenarios**.
+
+### 10.1 A kill round
+
+One round runs one seed for a fixed time:
+
+- the **server**, with small segments and frequent snapshots
+  (`--segment-size 64k --snapshot-every 256k`) so that rolling, snapshotting
+  and compaction all happen many times per round, under fire;
+- **producers**: processes that enqueue jobs with idempotency keys. Before each
+  attempt they journal `intent <key>`, after each reply `ok <key> <job id>`,
+  one fsynced line each. They deliberately re-enqueue old keys (their own and
+  other producers') to give the deduplication something to do;
+- **workers**: processes running `baton.Worker`. The handler's side effect is a
+  `Ledger.put_if_absent(key)` — an fsynced ledger shared by all workers — and
+  every run is logged (job, token, attempt, whether it was the run that landed
+  the effect). Some jobs fail on their first attempt, some are poison
+  (`Fatal` → dead-letter), most take a few milliseconds;
+- a **rogue**: a client that reserves jobs with a short lease, never
+  heartbeats, waits until `STATUS` proves the lease is gone (the job is pending
+  again or on a later attempt), and then sends `ACK` with the old token. Every
+  one of those must be answered `STALE`;
+- the **orchestrator**, which follows a schedule derived from the seed:
+  SIGKILL the server and restart it after a short outage; SIGKILL a worker and
+  start a new one; SIGSTOP a worker for longer than its leases and SIGCONT it
+  (a zombie: its jobs are redelivered while it still believes it owns them);
+  ask for a snapshot.
+
+Then producers stop, the killing stops, and the round **drains**: every
+journaled job must reach a terminal state within a deadline. Workers and
+server are stopped gracefully, and the checks run.
+
+### 10.2 The invariants, and what each check actually reads
+
+| # | Invariant | Evidence |
+|---|---|---|
+| 1 | Every enqueue that got `OK` ends up succeeded or dead | producer journals vs. `STATUS` of every journaled id after the drain (`--retain-finished 24h` keeps them visible): poison keys must be `dead`, all others `succeeded` |
+| 2 | Never two valid leases on a job; stale-token ACKs always rejected | **the server's own log**, read offline by `baton-logcheck` (below); plus the rogue's tally (stale ACKs accepted must be 0); plus the workers' run logs: at most one successful ACK per job, and it carries the highest token any worker ever saw for that job |
+| 3 | Handlers may run twice, each effect lands once | the ledger file is parsed *raw*, record by record, and must hold exactly one `done` entry per succeeded job's key — the `Ledger` class is not trusted to report on itself, since its in-memory map would hide a duplicate entry. The number of extra handler runs is reported |
+| 4 | One key never creates two jobs | every `ok` line for a key, across all producers and retries, names the same job id; and the server's `total_enqueued` lies between the number of keys acknowledged and the number attempted |
+| 5 | The server recovers after every kill | every restart must reach "accepting connections"; the wall time to get there and the server's own `recovery_ms` are recorded per kill |
+
+`baton-logcheck` (`tools/logcheck.cpp`) is a second, deliberately tiny
+implementation of the lease rules, independent of `State`: it walks the log —
+starting from the oldest retained snapshot if compaction has removed the
+beginning — and keeps only a map from job to its current token. It fails if
+tokens are ever reused or decrease, if a lease is granted while another is
+current, if a heartbeat, ack or failure is recorded for anything but the
+current token, or if a lease-expiry record is dated before the lease's
+recorded expiry. It opens the directory read-only: a log that would need
+repair is reported, not repaired.
+
+### 10.3 Reproducibility, honestly
+
+The seed fixes the schedule (what is killed, when, for how long), the workload
+mix and every process's own random choices. It cannot fix the operating
+system's scheduling, so a seed reproduces a *scenario*, not an interleaving: a
+failure may need several runs of its seed to show up again. To make up for
+that, a failing round keeps everything — data directory, every process's
+stderr, journals, run logs, the ledger, the log checker's output — and the
+report names the first violated invariant with the job ids involved.
+
+### 10.4 Fault scenarios
+
+Deterministic, one server each, checked against what was acknowledged before
+the fault:
+
+| Fault | Injected how | Required behaviour |
+|---|---|---|
+| Torn log tail | SIGKILL, then append half a record to the newest segment (and separately: chop bytes off it) | starts; with garbage appended every acknowledged job is there and `recovered_torn_bytes > 0`; with bytes chopped — which destroys acknowledged data, something a real torn write cannot do — it still starts, and what it has is a gap-free prefix |
+| Flipped bit mid-log | SIGKILL, flip one bit inside an early record | refuses to start, non-zero exit, names the segment and offset, leaves every file byte-for-byte untouched; with the bit restored it starts with everything |
+| Torn snapshot | truncate the newest `.snap`; leave a stray `.tmp` | starts from the older snapshot, reports one rejected snapshot, loses nothing, removes the `.tmp` |
+| Full disk | (a) `RLIMIT_FSIZE` below the segment size: the log write fails; (b) where a small file system is provided (`BATON_CHAOS_SMALL_FS`, a tmpfs in CI): fill it with ballast | (a) the server dies instead of acknowledging what it could not write, and after a restart without the limit every acknowledged job is there; (b) `ENQUEUE` is refused with `LIMIT` before the disk is full, everything else keeps working, and enqueueing resumes when space returns |
+
+Fsync failure, a stalled disk and clock jumps are not injected here: they need
+a file system or clock that lies on command, which is what `SimFs` and
+`FakeClock` are for (guarantees D7, W9, L12).
+
+### 10.5 Short and long runs
+
+CI runs two seeds for 20 seconds each plus the fault scenarios on every push.
+The long run (40 seeds × 45 s, more processes) is run locally before a release
+and its results are recorded in `docs/testing.md`.
+
+### 10.6 What it found
+
+Details and regression tests are in `docs/testing.md`; the short version is that
+the harness paid for itself within its first minutes, and that the most useful
+part was the one that shares no code with the server.
+
+1. **Leases expired up to a millisecond early.** Only `baton-logcheck` could
+   see this: it compares each expiry record with the expiry the log had
+   promised. Timers run on the monotonic clock, expiries are wall-clock
+   instants, and the two tick over at different moments. `State` now re-arms a
+   lease timer that fires before its wall-clock time, as it already did for
+   delayed jobs.
+2. **An SDK inference that could not be made sound.** A resent `ACK` that got
+   `STALE` was resolved by asking `STATUS`; a zombie whose successor had
+   completed the job concluded that its own `ACK` had counted. The server had
+   done nothing wrong — but no client can tell those cases apart, so the
+   protocol changed instead: `ACK` is idempotent for the completing token
+   (section 5 — a succeeded job keeps that token), and the SDK infers nothing.
+3. **A blind spot in the harness itself**, found by `chaos/selftest.sh`: the
+   first rogue client used its dead token at a moment when even a server
+   without token checks answers `STALE`. It now waits until a successor holds
+   the job.
+
+### 10.7 Limitations
+
+- **A seed is a scenario, not an interleaving** (10.3). There is no
+  deterministic simulation of the whole system; that would need the server's
+  I/O and threads behind an abstraction it does not have.
+- **Process kills, not power failures.** SIGKILL never tears a write or loses
+  un-synced data, because the kernel survives. Power-loss behaviour is covered
+  by `SimFs` crash images and, coarsely, by the torn-tail and torn-snapshot
+  scenarios.
+- **One machine, loopback network.** No partitions, no delays, no packet loss;
+  a paused process is the closest thing to a partition here.
+- **The full-disk scenario's second half needs a small file system** and is
+  skipped (and says so) without one.
+- **Invariant 3 is about the `Ledger`.** Effects that live elsewhere get
+  at-least-once, as section 9.4 says; the harness reports how often handlers
+  really ran more than once so that the number is not abstract.
 
 ---
 
