@@ -1,0 +1,34 @@
+# Build output
+/build/
+/out/
+/cmake-build-*/
+CMakeUserPresets.json
+compile_commands.json
+
+# Local, machine-specific dev helpers
+/.dev/
+
+# Editors
+.vscode/
+.idea/
+*.swp
+.DS_Store
+
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+.venv/
+venv/
+dist/
+
+# Runtime data and test artifacts
+/data/
+*.tmp
+/chaos/out/
+/bench/out/
+/fuzz/corpus-local/
+crash-*
+leak-*
+timeout-*
