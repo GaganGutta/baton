@@ -28,3 +28,12 @@ baton_add_test(sched_test
   SOURCES
     sched/timing_wheel_test.cpp
   LIBS baton_sched)
+
+baton_add_test(state_test
+  SOURCES
+    state/engine_test.cpp
+    state/model_test.cpp
+    state/ready_heap_test.cpp
+    state/records_test.cpp
+    state/state_test.cpp
+  LIBS baton_state)

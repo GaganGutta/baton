@@ -112,7 +112,7 @@ class TimingWheel {
   size_t size_ = 0;
   std::vector<Node> nodes_;
   uint32_t free_head_ = kNil;
-  std::array<uint32_t, kDueList + 1> heads_;
+  std::array<uint32_t, kDueList + 1> heads_{};  // filled with kNil by the constructor
   std::array<uint64_t, kLevels> occupied_{};
 };
 

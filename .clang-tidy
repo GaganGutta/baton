@@ -35,6 +35,7 @@ Checks: >
   -readability-identifier-length,
   -readability-magic-numbers,
   -readability-named-parameter,
+  -readability-redundant-member-init,
   -readability-uppercase-literal-suffix
 
 # Why these are off:
@@ -57,6 +58,9 @@ Checks: >
 #  readability-braces-around-statements   single-line guards (`if (x) return;`) are allowed
 #  readability-function-cognitive-*       the command dispatcher and parsers are inherently branchy
 #  readability-identifier-length          `fd`, `n`, `it` are fine
+#  readability-redundant-member-init      contradicts GCC's -Wmissing-field-initializers (-Wextra), which
+#                                         wants `{}` on aggregate members that designated initializers
+#                                         may omit; -Wall -Wextra -Werror is the project's requirement
 
 WarningsAsErrors: '*'
 HeaderFilterRegex: '.*/src/.*'

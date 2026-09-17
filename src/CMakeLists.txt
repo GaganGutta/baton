@@ -12,6 +12,7 @@ configure_file(common/version.h.in "${PROJECT_BINARY_DIR}/generated/common/versi
 add_subdirectory(common)
 add_subdirectory(log)
 add_subdirectory(sched)
+add_subdirectory(state)
 add_subdirectory(server)
 
 if(BATON_BUILD_TESTS OR BATON_BUILD_FUZZ)
