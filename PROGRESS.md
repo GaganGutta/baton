@@ -6,16 +6,16 @@ from here with no other context. Read `PLAN.md` for the task breakdown and
 
 ## Status
 
-- **Current milestone:** M1 (durable log) — in progress
-- **Last completed task:** M0 done (CI green on first push, run 35181138012); M1 design section written
-- **Next task:** M1 code: crc32c → codec → FileSystem (PosixFs + SimFs) → log format/reader/recovery → group-commit log thread
+- **Current milestone:** M2 (state machine) — next
+- **Last completed task:** M1 durable log: code, tests, fuzz targets, mutation check, docs
+- **Next task:** M2 design section in `docs/design.md`, then timing wheel → job store → records → `apply()`
 
 ## Milestones
 
 | Milestone | State | Notes |
 |---|---|---|
 | M0 Scaffold | **done** | CI: gcc-14 + clang-18 (release, asan), tsan, tidy (LLVM 21), macOS, Docker |
-| M1 Durable log | in progress | design in docs/design.md §4 |
+| M1 Durable log | **done** | 140 tests under ASan+UBSan and TSan; 6/6 mutants killed; 2 fuzz targets; guarantees D1–D9 |
 | M2 State machine | not started | |
 | M3 Networking | not started | |
 | M4 Leases/retries/DLQ | not started | |
@@ -45,6 +45,14 @@ from here with no other context. Read `PLAN.md` for the task breakdown and
   so no private email address lands in a public repo.
 - Docker Desktop is installed but was not running at project start; it is needed
   for the Dockerfile check (M0) and the Beanstalkd/Faktory comparison (M8).
+
+## How to verify the current state
+
+```bash
+scripts/check.sh            # format, asan, tsan, tidy
+scripts/check.sh fuzz       # 30 s per fuzz target
+scripts/mutation-check.sh   # durability mutants must all be killed
+```
 
 ## Key decisions so far
 

@@ -9,9 +9,10 @@ the chaos harness and its recorded results.
 | Layer | What it proves | Where | Status |
 |---|---|---|---|
 | Unit tests (GoogleTest) | each module against its contract, incl. death tests for aborts | `tests/unit/` | from M0 |
+| Crash-image tests | every committed record survives a crash at any point; torn tails are repaired; damage is refused | `tests/unit/log/` on top of `SimFs` | M1 |
+| Mutation check | the durability tests fail when a durability rule is broken | `scripts/mutation-check.sh` | M1 |
 | Model-based tests | random operation sequences keep state invariants; live state == replayed state | `tests/unit/state/` | M2 |
-| Fault-injection tests | torn writes, bit flips, fsync failure, ENOSPC through a fake filesystem | `tests/unit/log/`, `tests/unit/snapshot/` | M1, M5 |
-| Fuzzing (libFuzzer) | parsers and decoders never crash or over-read on arbitrary bytes | `fuzz/` | from M1 |
+| Fuzzing (libFuzzer) | parsers and decoders never crash or over-read; recovery never delivers damaged data | `fuzz/` | from M1 |
 | Integration tests (pytest) | the real binary with redis-cli, redis-py and the SDK | `tests/integration/`, `sdk/python/tests/` | M3, M6 |
 | Chaos harness | invariants hold under repeated SIGKILL and injected disk faults | `chaos/` | M7 |
 
@@ -20,7 +21,9 @@ the chaos harness and its recorded results.
 ```bash
 scripts/check.sh              # format check, ASan+UBSan, TSan, clang-tidy: what CI runs
 scripts/check.sh asan         # one step only
-ctest --preset asan -R Result # a subset, after `cmake --preset asan && cmake --build --preset asan`
+scripts/check.sh fuzz         # build the fuzzers and run each for 30 s
+scripts/mutation-check.sh     # a few minutes; run after touching src/log or its tests
+ctest --preset asan -R Recovery   # a subset (after configuring and building the preset)
 ```
 
 All unit tests run under AddressSanitizer + UndefinedBehaviorSanitizer and again
@@ -28,8 +31,66 @@ under ThreadSanitizer, locally and in CI. UBSan is configured with
 `-fno-sanitize-recover=all`, so undefined behaviour fails the run instead of
 printing a warning.
 
+## SimFs: deterministic crash testing
+
+Durability bugs hide in the gap between "written" and "on disk". `SimFs`
+(`src/testing/sim_fs.h`) is an in-memory file system that models exactly that
+gap: appended bytes are volatile until `sync()`, and directory changes are
+volatile until `sync_dir()`. It can produce the file system as it would look
+after three kinds of crash:
+
+| Mode | Models | What survives |
+|---|---|---|
+| `kKeepUnsynced` | process crash (SIGKILL, OOM) | everything written |
+| `kLoseUnsynced` | clean power loss | only synced bytes and synced directory entries |
+| `kTorn` | power loss mid-writeback | synced bytes, plus a random prefix of each unsynced tail whose end may be garbage; each directory's unsynced changes all survive or all vanish |
+
+A crash image can be captured after the *n*-th file-system operation while the
+code under test keeps running, together with what had been acknowledged at that
+instant. `tests/unit/log/crash_test.cpp` does this for 6 scenarios × 150 seeds
+and checks that recovery succeeds, every acknowledged record is back intact,
+LSNs are contiguous, and the repaired log accepts new writes. `SimFs` has its
+own tests (`tests/unit/testing/`), because a simulator that is too forgiving
+would make everything built on it meaningless.
+
+## Mutation check: testing the tests
+
+A durability test that cannot fail proves nothing. `scripts/mutation-check.sh`
+breaks one rule at a time in a scratch copy of the tree and requires the test
+suite to fail each time:
+
+| Mutant | Rule it breaks |
+|---|---|
+| segment created without directory fsync | D6 |
+| commit announced before fsync | D1 |
+| segment rolled before the old one is durable | D6 |
+| torn tail not truncated | D3 |
+| mid-log damage treated as a torn tail | D4 |
+| record checksum not verified | D4, D5 |
+
+Last run: 2026-09-17, all six killed.
+
+## Fuzz targets
+
+| Target | Input | Oracle |
+|---|---|---|
+| `fuzz_log_segment` | arbitrary bytes as the newest log segment | no crash or sanitizer report; delivered LSNs are contiguous; a repair is idempotent |
+| `fuzz_log_damage` | a program of damage operations (bit flips, truncation, garbage, deleted segments) applied to a valid multi-segment log | recovery either refuses or delivers an intact prefix of the original records — never a damaged record, never one out of order |
+
+`fuzz_log_damage` is structure-aware because raw-byte fuzzing cannot get past
+the record checksums. Its garbage comes from a PRNG seeded by the input rather
+than from the input itself: libFuzzer's compare tracing can learn checksum
+values, and with raw control it could forge a record with a valid CRC, which is
+not a recovery bug (a checksum is not a MAC).
+
+CI runs every target for 60 seconds per push; reproducers are uploaded as
+artifacts on failure. Longer local runs are recorded here as they happen.
+
 ## Rules
 
 - A failing test is fixed in the code, never skipped, disabled or weakened.
 - Every bug found by fuzzing or chaos gets a regression test before the fix.
-- Tests that involve time use `FakeClock`; no test sleeps to wait for a timer.
+- Tests that involve job timers use `FakeClock`. No test relies on a fixed
+  sleep; the few that wait for another thread (the log thread's commit, the
+  background fsync of the `interval` policy) block on a condition with a
+  generous timeout.

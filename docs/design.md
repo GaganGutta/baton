@@ -413,6 +413,31 @@ target for the segment reader.
 - **io_uring.** One sequential writer issuing write+fsync gains little from it
   and it would cost the macOS port.
 
+### 4.7 Known limitations (recorded after implementation)
+
+- **The end of the log cannot be proven.** Damage confined to the *final*
+  record, a newest segment that has been deleted, or a log cut exactly at a
+  record boundary all look like a log that simply ended earlier, so recovery
+  accepts them (`RecoveryTest.DamageConfinedToTheFinalRecordIsTreatedAsTorn`
+  pins this down). A checksum can prove that bytes are intact, not that there
+  were no more of them. Closing this gap needs a separately persisted "log ends
+  at LSN n" marker, i.e. a second fsync per commit; baton does not pay that.
+  Snapshots (M5) narrow the window: a log that ends before the snapshot's LSN is
+  refused.
+- **Stricter than necessary in one torn-write pattern** (section 4.4): an
+  out-of-order multi-block torn write is refused rather than repaired.
+- **Recovery reads one whole segment into memory at a time** (64 MiB by
+  default). Simple, and it makes the scan-forward check trivial.
+- **`flush()` copies when the log thread has not yet picked up the previous
+  batch.** It is a memcpy of bytes that are about to be written to disk anyway;
+  M8 measures whether it matters.
+- **Little-endian hosts only** (x86-64, arm64), enforced by a `static_assert`.
+- **A full disk aborts the process** (section 4.3). M3 adds the free-space check
+  that turns an approaching full disk into a clear client-visible error first.
+- **The `interval` fsync timer runs on the real steady clock**, not the
+  injectable `Clock`: it lives entirely inside the log thread and nothing
+  observable depends on its exact timing.
+
 ---
 
 ## Credits

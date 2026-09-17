@@ -32,30 +32,31 @@ Conventions used below:
 ## Phase 1 — MVP
 
 ### M0. Scaffold
-- [ ] Repo hygiene: `.gitignore`, `.gitattributes` (LF everywhere), `.editorconfig`, MIT `LICENSE`.
-- [ ] `CMakeLists.txt` + `CMakePresets.json`: presets `debug`, `release`, `asan` (ASan+UBSan), `tsan`, `fuzz` (clang + libFuzzer), `tidy`. C++20, `-Wall -Wextra -Werror`, warnings applied only to baton targets (not FetchContent deps).
-- [ ] FetchContent: GoogleTest, Google Benchmark (pinned tags). Fuzz targets use the compiler's libFuzzer.
-- [ ] `.clang-format`, `.clang-tidy`; `scripts/format.sh`, `scripts/check.sh` (what CI runs, runnable locally).
-- [ ] `src/common`: `Result<T>`/`Error`, `BATON_CHECK`, logger, RAII `Fd`, clock interface — with unit tests.
-- [ ] `src/server/main.cpp`: `baton --version` so the binary, Dockerfile, and CI have something real to build.
-- [ ] GitHub Actions: GCC + Clang builds, ASan+UBSan tests, TSan job, macOS build+test, clang-format check, clang-tidy, Docker image build. The fuzz job is added with the first fuzz target (M1) and the chaos job with the harness (M7) — a CI job that runs nothing would only pretend to cover something.
-- [ ] Multi-stage `Dockerfile` (build stage → minimal runtime, non-root user, volume for data dir).
-- [ ] Skeletons: `README.md`, `docs/design.md` (M0 section: error handling + logging decisions), `docs/guarantees.md`, `docs/protocol.md`, `docs/testing.md`, `docs/roadmap.md`.
-- [ ] CI green, push.
+- [x] Repo hygiene: `.gitignore`, `.gitattributes` (LF everywhere), `.editorconfig`, MIT `LICENSE`.
+- [x] `CMakeLists.txt` + `CMakePresets.json`: presets `debug`, `release`, `asan` (ASan+UBSan), `tsan`, `fuzz` (clang + libFuzzer), `tidy`. C++20, `-Wall -Wextra -Werror`, warnings applied only to baton targets (not FetchContent deps).
+- [x] FetchContent: GoogleTest, Google Benchmark (pinned tags). Fuzz targets use the compiler's libFuzzer.
+- [x] `.clang-format`, `.clang-tidy`; `scripts/format.sh`, `scripts/check.sh` (what CI runs, runnable locally).
+- [x] `src/common`: `Result<T>`/`Error`, `BATON_CHECK`, logger, RAII `Fd`, clock interface — with unit tests.
+- [x] `src/server/main.cpp`: `baton --version` so the binary, Dockerfile, and CI have something real to build.
+- [x] GitHub Actions: GCC + Clang builds, ASan+UBSan tests, TSan job, macOS build+test, clang-format check, clang-tidy, Docker image build. The fuzz job is added with the first fuzz target (M1) and the chaos job with the harness (M7) — a CI job that runs nothing would only pretend to cover something.
+- [x] Multi-stage `Dockerfile` (build stage → minimal runtime, non-root user, volume for data dir).
+- [x] Skeletons: `README.md`, `docs/design.md` (M0 section: error handling + logging decisions), `docs/guarantees.md`, `docs/protocol.md`, `docs/testing.md`, `docs/roadmap.md`.
+- [x] CI green, push.
 
 ### M1. Durable log
-- [ ] Design section: segment + record format, recovery rules, group commit, fsync policies, fsync-failure policy (crash; "fsyncgate"), directory fsync rules.
-- [ ] `common/crc32c`: software slicing-by-8 + hardware (SSE4.2 / ARMv8 CRC) with runtime dispatch; tests against known vectors and hw==sw on random data.
-- [ ] `common/codec`: little-endian fixed ints, varints, length-prefixed bytes; bounds-checked reader.
-- [ ] `common/fs`: thin `FileSystem` interface (open/append/sync/rename/remove/list/sync-dir) with a POSIX implementation and a fault-injecting in-memory fake for tests (torn writes, fsync failure, ENOSPC).
-- [ ] `log/format`: record header `length | crc32c | type | lsn`, segment header (magic, version, first LSN, CRC).
-- [ ] `log/segment_writer`: append, roll at size threshold (fsync old → create new → header → fsync file → fsync dir).
-- [ ] `log/reader` + recovery: scan segments in LSN order, verify CRC and LSN continuity; torn tail in final segment → truncate; anything else (bad record followed by a valid one, bad record in a non-final segment, LSN gap, missing segment) → refuse to start with a precise error.
-- [ ] `log/log_thread`: group commit. Event loop hands over batches; log thread writes, fsyncs per policy (`always` = fdatasync before acknowledging; `interval` = acknowledge after write, fsync on a timer), publishes `durable_lsn`, wakes the loop. Backpressure when the un-durable backlog exceeds a bound.
-- [ ] macOS: `F_FULLFSYNC`; Linux: `fdatasync`.
-- [ ] Tests: round-trip; roll; truncation at **every byte offset** of the final record; bit flip at every byte of a mid-log record → refuse; LSN gap; missing middle segment; empty/partial final segment header; fsync failure → process aborts (death test); group commit ordering + batch accounting; TSan run of the log thread.
-- [ ] Fuzz target: record decoder.
-- [ ] Update design (limitations), guarantees, PROGRESS; CI green; push.
+- [x] Design section: segment + record format, recovery rules, group commit, fsync policies, fsync-failure policy (crash; "fsyncgate"), directory fsync rules.
+- [x] `common/crc32c`: software slicing-by-8 + hardware (SSE4.2 / ARMv8 CRC) with runtime dispatch; tests against known vectors and hw==sw on random data.
+- [x] `common/codec`: little-endian fixed ints, varints, length-prefixed bytes; bounds-checked reader.
+- [x] `common/fs`: thin `FileSystem` interface (open/append/sync/rename/remove/list/sync-dir) with a POSIX implementation and a fault-injecting in-memory fake for tests (torn writes, fsync failure, ENOSPC).
+- [x] `log/format`: record header `length | crc32c | type | lsn`, segment header (magic, version, first LSN, CRC).
+- [x] `log/segment_writer`: append, roll at size threshold (fsync old → create new → header → fsync file → fsync dir).
+- [x] `log/reader` + recovery: scan segments in LSN order, verify CRC and LSN continuity; torn tail in final segment → truncate; anything else (bad record followed by a valid one, bad record in a non-final segment, LSN gap, missing segment) → refuse to start with a precise error.
+- [x] `log/log_thread`: group commit. Event loop hands over batches; log thread writes, fsyncs per policy (`always` = fdatasync before acknowledging; `interval` = acknowledge after write, fsync on a timer), publishes `durable_lsn`, wakes the loop. Backpressure when the un-durable backlog exceeds a bound.
+- [x] macOS: `F_FULLFSYNC`; Linux: `fdatasync`.
+- [x] Tests: round-trip; roll; truncation at **every byte offset** of the final record; bit flip at every byte of a mid-log record → refuse; LSN gap; missing middle segment; empty/partial final segment header; fsync failure → process aborts (death test); group commit ordering + batch accounting; TSan run of the log thread.
+- [x] Fuzz targets: `fuzz_log_segment` (raw bytes) and `fuzz_log_damage` (structure-aware damage to a valid log).
+- [x] `scripts/mutation-check.sh`: six durability mutants, all must be killed.
+- [x] Update design (limitations), guarantees, PROGRESS; CI green; push.
 
 ### M2. State machine
 - [ ] Design section: job model, records (the "facts" vocabulary), apply rules, queue ordering `(priority desc, run_at asc, id asc)`, idempotency index semantics, invisible GC rules (key expiry, finished-job retention), memory accounting, timing wheel.
