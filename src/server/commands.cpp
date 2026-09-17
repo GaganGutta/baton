@@ -148,11 +148,13 @@ Server::Verdict Server::cmd_auth(Connection& c, Args args, std::string& reply) {
 
 Server::Verdict Server::cmd_hello(Connection& c, Args args, std::string& reply) {
   size_t i = 1;
+  bool resp3 = c.resp3;
   if (i < args.size()) {
-    if (args[i] != "2") {
-      resp_error(reply, "NOPROTO", "baton speaks RESP2 only");
+    if (args[i] != "2" && args[i] != "3") {
+      resp_error(reply, "NOPROTO", "unsupported protocol version (baton speaks RESP 2 and 3)");
       return Verdict::kReplied;
     }
+    resp3 = args[i] == "3";
     ++i;
   }
   while (i < args.size()) {
@@ -176,10 +178,11 @@ Server::Verdict Server::cmd_hello(Connection& c, Args args, std::string& reply) 
     resp_error(reply, "NOAUTH", "HELLO must be called with AUTH when a password is set");
     return Verdict::kReplied;
   }
-  resp_array_header(reply, 14);
+  c.resp3 = resp3;  // only once the handshake has succeeded
+  resp_map_header(reply, 7, c.resp3);
   field(reply, "server", "baton");
   field(reply, "version", kVersion);
-  field(reply, "proto", int64_t{2});
+  field(reply, "proto", int64_t{c.resp3 ? 3 : 2});
   field(reply, "id", static_cast<int64_t>(c.id));
   field(reply, "mode", "standalone");
   field(reply, "role", "master");
@@ -411,7 +414,7 @@ Server::Verdict Server::cmd_reserve(Connection& c, Args args, std::string& reply
   // An error (bad queue name, bad lease) or a job both answer right away.
   if (try_reserve(c, blocked.queues, blocked.lease_ms, reply)) return Verdict::kReplied;
   if (*timeout_ms == 0) {
-    resp_null_array(reply);
+    resp_null(reply, c.resp3);
     return Verdict::kReplied;
   }
   park(c, std::move(blocked), *timeout_ms);
@@ -501,8 +504,8 @@ Server::Verdict Server::cmd_cancel(Connection& /*c*/, Args args, std::string& re
   return Verdict::kReplied;
 }
 
-void Server::append_job_status(std::string& reply, const Job& job, bool with_payload) {
-  resp_array_header(reply, with_payload ? 28 : 26);
+void Server::append_job_status(std::string& reply, const Job& job, bool with_payload, bool resp3) {
+  resp_map_header(reply, with_payload ? 14 : 13, resp3);
   field(reply, "id", static_cast<int64_t>(job.id));
   field(reply, "queue", job.queue->name);
   field(reply, "state", to_string(job.state));
@@ -519,7 +522,7 @@ void Server::append_job_status(std::string& reply, const Job& job, bool with_pay
   if (with_payload) field(reply, "payload", job.payload.view());
 }
 
-Server::Verdict Server::cmd_status(Connection& /*c*/, Args args, std::string& reply) {
+Server::Verdict Server::cmd_status(Connection& c, Args args, std::string& reply) {
   const auto id = parse_u64(args[1]);
   const bool with_payload = args.size() == 3 && upper(args[2]) == "PAYLOAD";
   if (!id || args.size() > 3 || (args.size() == 3 && !with_payload)) {
@@ -530,15 +533,16 @@ Server::Verdict Server::cmd_status(Connection& /*c*/, Args args, std::string& re
   if (job == nullptr) {
     resp_error(reply, "NOTFOUND", std::format("no such job: {}", *id));
   } else {
-    append_job_status(reply, *job, with_payload);
+    append_job_status(reply, *job, with_payload, c.resp3);
   }
   return Verdict::kReplied;
 }
 
-void Server::append_queue_stats(std::string& reply, std::string_view name, const Queue* queue) {
+void Server::append_queue_stats(std::string& reply, std::string_view name, const Queue* queue,
+                                bool resp3) {
   static const Queue empty_queue{};
   const Queue& q = queue != nullptr ? *queue : empty_queue;
-  resp_array_header(reply, 24);
+  resp_map_header(reply, 12, resp3);
   field(reply, "queue", name);
   for (size_t i = 0; i < kJobStateCount; ++i) {
     field(reply, to_string(static_cast<JobState>(i)), static_cast<int64_t>(q.counts[i]));
@@ -550,15 +554,15 @@ void Server::append_queue_stats(std::string& reply, std::string_view name, const
   field(reply, "total_cancelled", static_cast<int64_t>(q.totals.cancelled));
 }
 
-Server::Verdict Server::cmd_stats(Connection& /*c*/, Args args, std::string& reply) {
+Server::Verdict Server::cmd_stats(Connection& c, Args args, std::string& reply) {
   if (args.size() > 2) {
     syntax_error(reply, "usage: STATS [<queue>]");
   } else if (args.size() == 2) {
-    append_queue_stats(reply, args[1], state_->find_queue(args[1]));
+    append_queue_stats(reply, args[1], state_->find_queue(args[1]), c.resp3);
   } else {
     resp_array_header(reply, state_->queues().size());
     for (const auto& [name, queue] : state_->queues()) {
-      append_queue_stats(reply, name, queue.get());
+      append_queue_stats(reply, name, queue.get(), c.resp3);
     }
   }
   return Verdict::kReplied;

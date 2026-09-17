@@ -151,7 +151,7 @@ TEST_F(ServerTest, EnqueueOptionsAreValidated) {
 
 TEST_F(ServerTest, ClientLibraryHandshakeCommandsWork) {
   RespClient c = connect();
-  EXPECT_EQ(c.command({"HELLO", "3"}), "-NOPROTO baton speaks RESP2 only");
+  EXPECT_TRUE(StartsWith(c.command({"HELLO", "4"}), "-NOPROTO"));
   EXPECT_TRUE(StartsWith(c.command({"HELLO", "2", "SETNAME", "worker-7"}), "[$server, $baton,"));
   EXPECT_EQ(c.command({"CLIENT", "GETNAME"}), "$worker-7");
   EXPECT_EQ(c.command({"CLIENT", "SETINFO", "LIB-NAME", "redis-py"}), "+OK");
@@ -166,6 +166,31 @@ TEST_F(ServerTest, ClientLibraryHandshakeCommandsWork) {
   EXPECT_EQ(c.command({"INFO", "jobs"}).find("# Server"), std::string::npos);
   EXPECT_EQ(c.command({"QUIT"}), "+OK");
   EXPECT_TRUE(c.wait_for_close());
+}
+
+// Clients that default to RESP3 (redis-py 8 does) open with HELLO 3 and treat a
+// refusal as fatal. After HELLO 3 the connection gets maps and the RESP3 null;
+// other connections are unaffected.
+TEST_F(ServerTest, Resp3IsNegotiatedPerConnection) {
+  RespClient v3 = connect();
+  RespClient v2 = connect();
+  EXPECT_TRUE(StartsWith(v3.command({"HELLO", "3"}), "{$server: $baton, $version: "));
+  ASSERT_EQ(v3.command({"ENQUEUE", "q", "x"}), ":1");
+
+  EXPECT_TRUE(StartsWith(v3.command({"STATUS", "1"}), "{$id: :1, $queue: $q, $state: $ready,"));
+  EXPECT_TRUE(StartsWith(v2.command({"STATUS", "1"}), "[$id, :1, $queue, $q, $state, $ready,"));
+  EXPECT_TRUE(StartsWith(v3.command({"STATS", "q"}), "{$queue: $q, $scheduled: :0, $ready: :1,"));
+  EXPECT_TRUE(StartsWith(v3.command({"STATS"}), "[{$queue: $q,"));
+
+  v3.send({"RESERVE", "0", "1000", "empty"});
+  v2.send({"RESERVE", "0", "1000", "empty"});
+  EXPECT_EQ(v3.read_reply(), "nil");
+  EXPECT_EQ(v2.read_reply(), "nil");
+  EXPECT_TRUE(StartsWith(v3.command({"RESERVE", "0", "1000", "q"}), "[:1, :1, $q, $x,"));
+
+  // HELLO 2 switches back.
+  EXPECT_TRUE(StartsWith(v3.command({"HELLO", "2"}), "[$server, $baton,"));
+  EXPECT_TRUE(StartsWith(v3.command({"STATUS", "1"}), "[$id, :1,"));
 }
 
 // --- the core invariant ------------------------------------------------------------------

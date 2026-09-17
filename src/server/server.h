@@ -142,8 +142,9 @@ class Server {
 
   bool check_password(std::string_view candidate) const;
   std::string build_info(std::string_view section) const;
-  static void append_job_status(std::string& reply, const Job& job, bool with_payload);
-  static void append_queue_stats(std::string& reply, std::string_view name, const Queue* queue);
+  static void append_job_status(std::string& reply, const Job& job, bool with_payload, bool resp3);
+  static void append_queue_stats(std::string& reply, std::string_view name, const Queue* queue,
+                                 bool resp3);
 
   ServerConfig config_;
   FileSystem& fs_;

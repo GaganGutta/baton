@@ -84,7 +84,13 @@ void resp_simple(std::string& out, std::string_view text);  // +text
 void resp_error(std::string& out, std::string_view code, std::string_view message);
 void resp_integer(std::string& out, int64_t value);
 void resp_bulk(std::string& out, std::string_view data);
-void resp_null_array(std::string& out);
 void resp_array_header(std::string& out, size_t count);  // followed by `count` values
+
+// The two replies that differ between protocol versions. A connection speaks
+// RESP3 after `HELLO 3`; everything else baton sends is valid in both.
+//   "nothing":         RESP2 null array `*-1`, RESP3 null `_`
+//   field-value pairs: RESP2 flat array of 2n, RESP3 map of n
+void resp_null(std::string& out, bool resp3);
+void resp_map_header(std::string& out, size_t pairs, bool resp3);  // followed by 2*pairs values
 
 }  // namespace baton

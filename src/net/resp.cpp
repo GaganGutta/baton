@@ -191,11 +191,21 @@ void resp_bulk(std::string& out, std::string_view data) {
   out.append("\r\n");
 }
 
-void resp_null_array(std::string& out) { out.append("*-1\r\n"); }
-
 void resp_array_header(std::string& out, size_t count) {
   out.push_back('*');
   out.append(std::to_string(count));
+  out.append("\r\n");
+}
+
+void resp_null(std::string& out, bool resp3) { out.append(resp3 ? "_\r\n" : "*-1\r\n"); }
+
+void resp_map_header(std::string& out, size_t pairs, bool resp3) {
+  if (!resp3) {
+    resp_array_header(out, 2 * pairs);
+    return;
+  }
+  out.push_back('%');
+  out.append(std::to_string(pairs));
   out.append("\r\n");
 }
 

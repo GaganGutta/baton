@@ -51,6 +51,7 @@ struct Connection {
 
   // --- session -------------------------------------------------------------------------
   bool authenticated = false;
+  bool resp3 = false;              // after HELLO 3: maps and `_` instead of flat arrays and `*-1`
   bool close_after_flush = false;  // protocol error or QUIT: reply, then close
   bool read_paused = false;        // backpressure: the log is behind
   std::string name;

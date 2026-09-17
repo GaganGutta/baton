@@ -202,16 +202,26 @@ TEST(RespWriterTest, ProducesValidResp) {
   resp_integer(out, -42);
   resp_bulk(out, std::string_view("a\0b", 3));
   resp_bulk(out, "");
-  resp_null_array(out);
   resp_array_header(out, 2);
   std::string expected = "+OK\r\n";
   expected += "-STALE token 5 is not  the current lease\r\n";  // CR and LF were neutralized
   expected += ":-42\r\n";
   expected += "$3\r\n" + std::string("a\0b", 3) + "\r\n";
   expected += "$0\r\n\r\n";
-  expected += "*-1\r\n";
   expected += "*2\r\n";
   EXPECT_EQ(out, expected);
+}
+
+TEST(RespWriterTest, NullAndMapsDependOnTheProtocolVersion) {
+  std::string v2;
+  resp_null(v2, /*resp3=*/false);
+  resp_map_header(v2, 3, /*resp3=*/false);
+  EXPECT_EQ(v2, "*-1\r\n*6\r\n") << "RESP2: null array, and a flat array of 2n";
+
+  std::string v3;
+  resp_null(v3, /*resp3=*/true);
+  resp_map_header(v3, 3, /*resp3=*/true);
+  EXPECT_EQ(v3, "_\r\n%3\r\n") << "RESP3: null, and a map of n";
 }
 
 }  // namespace

@@ -507,7 +507,7 @@ void Server::expire_reserve_timeouts() {
     if (c == nullptr || !c->blocked || c->blocked->timeout != event.handle) continue;
     unpark(*c);
     std::string reply;
-    resp_null_array(reply);
+    resp_null(reply, c->resp3);
     queue_reply(*c, reply);
     resume_.push_back(c->id);
   }
@@ -556,7 +556,7 @@ void Server::shutdown() {
     if (c == nullptr || !c->blocked) continue;
     unpark(*c);
     std::string reply;
-    resp_null_array(reply);
+    resp_null(reply, c->resp3);
     queue_reply(*c, reply);
   }
   log_->stop();               // flush, fsync, join: everything logged is now durable

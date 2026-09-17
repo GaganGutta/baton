@@ -148,6 +148,21 @@ class RespClient {
         }
         return out + "]";
       }
+      case '_':  // RESP3 null
+        return std::string("nil");
+      case '%': {  // RESP3 map, rendered as {key: value, ...}
+        const long pairs = std::stol(line);
+        std::string out = "{";
+        for (long i = 0; i < pairs; ++i) {
+          const auto key = render(pos);
+          if (!key) return std::nullopt;
+          const auto value = render(pos);
+          if (!value) return std::nullopt;
+          if (i > 0) out += ", ";
+          out += *key + ": " + *value;
+        }
+        return out + "}";
+      }
       default:
         throw std::runtime_error("RespClient: server sent invalid RESP");
     }
