@@ -3,6 +3,7 @@
 #include <algorithm>
 #include <charconv>
 #include <format>
+#include <utility>
 
 namespace baton {
 namespace {
@@ -76,7 +77,7 @@ RespParser::Outcome RespParser::parse(std::string_view data, RespRequest& reques
     count = header.value;
     if (count > 0) break;
   }
-  if (static_cast<uint64_t>(count) > limits_.max_args) {
+  if (std::cmp_greater(count, limits_.max_args)) {
     return fail(error, std::format("too many arguments ({} > {})", count, limits_.max_args));
   }
 
@@ -92,7 +93,7 @@ RespParser::Outcome RespParser::parse(std::string_view data, RespRequest& reques
       return Outcome{.status = Status::kNeedMore, .consumed = start};
     }
     if (header.status == LineStatus::kBad || header.value < 0 ||
-        static_cast<uint64_t>(header.value) > limits_.hard_max_bulk_bytes) {
+        std::cmp_greater(header.value, limits_.hard_max_bulk_bytes)) {
       return fail(error, "invalid bulk length");
     }
     const auto length = static_cast<uint64_t>(header.value);
@@ -147,7 +148,7 @@ RespParser::Outcome RespParser::parse_discarding(std::string_view data, size_t p
       return Outcome{.status = Status::kNeedMore, .consumed = pos};
     }
     if (header.status == LineStatus::kBad || header.value < 0 ||
-        static_cast<uint64_t>(header.value) > limits_.hard_max_bulk_bytes) {
+        std::cmp_greater(header.value, limits_.hard_max_bulk_bytes)) {
       Outcome outcome = fail(error, "invalid bulk length");
       outcome.consumed = pos;
       return outcome;
