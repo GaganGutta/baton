@@ -112,7 +112,7 @@ class Bench:
                 "records_per_batch_avg": float(p["log_batch_records_avg"]),
                 "records_per_batch_max": p["log_batch_records_max"],
                 "fsyncs": p["log_fsync_count"], "fsync_p50_us": p["log_fsync_p50_us"],
-                "fsync_p99_us": p["log_fsync_p99_us"]}
+                "fsync_p99_us": p["log_fsync_p99_us"], "fsync_max_us": p["log_fsync_max_us"]}
 
     # --- experiments ----------------------------------------------------------------------
 
@@ -143,7 +143,8 @@ class Bench:
             for rate in rates:
                 self.start_server("--fsync", policy)
                 run = self.loadgen(mode="enqueue", connections=16, rate=rate)
-                rows.append({"fsync": policy, "connections": 16, "target_rate": rate, **run})
+                rows.append({"fsync": policy, "connections": 16, "target_rate": rate, **run,
+                             "group_commit": self.group_commit()})
                 self.stop_server()
         return rows
 
@@ -163,7 +164,8 @@ class Bench:
             for rate in (1_000, 5_000):
                 self.start_server("--fsync", policy)
                 run = self.loadgen(mode="e2e", producers=4, workers=64, rate=rate)
-                rows.append({"fsync": policy, "target_rate": rate, **run})
+                rows.append({"fsync": policy, "target_rate": rate, **run,
+                             "group_commit": self.group_commit()})
                 self.stop_server()
         return rows
 
@@ -291,12 +293,13 @@ def markdown(results: dict) -> str:
         out.append("")
     if "latency" in e:
         out += ["### Enqueue latency at a fixed rate (open loop, 16 connections)", "",
-                "| fsync | target jobs/s | achieved jobs/s | latency p50 / p99 / p99.9 ms | max ms |",
-                "|---|---:|---:|---:|---:|"]
+                "| fsync | target jobs/s | achieved jobs/s | latency p50 / p99 / p99.9 ms | max ms | "
+                "server's fsync p50 / p99 / max ms |", "|---|---:|---:|---:|---:|---:|"]
         for r in e["latency"]:
-            h = r["enqueue_latency_us"]
+            h, g = r["enqueue_latency_us"], r["group_commit"]
             out.append(f"| {r['fsync']} | {r['target_rate']:,} | {r['enqueued_per_s']:,.0f} | "
-                       f"{lat(h)} | {h['max'] / 1000:.1f} |")
+                       f"{lat(h)} | {h['max'] / 1000:.1f} | {g['fsync_p50_us'] / 1000:.2f} / "
+                       f"{g['fsync_p99_us'] / 1000:.2f} / {g['fsync_max_us'] / 1000:.1f} |")
         out.append("")
     if "e2e" in e:
         out += ["### End to end: 8 pipelining producers, N workers (closed loop)", "",
@@ -313,10 +316,13 @@ def markdown(results: dict) -> str:
                 "From the moment the ENQUEUE was due to be sent to the moment a worker holds the",
                 "job: the enqueue's fsync, the hand-off to a parked RESERVE, and the lease's fsync.",
                 "", "| fsync | jobs/s | completed/s | enqueue p50 / p99 / p99.9 ms | "
-                "pickup p50 / p99 / p99.9 ms |", "|---|---:|---:|---:|---:|"]
+                "pickup p50 / p99 / p99.9 ms | server's fsync p99 / max ms |",
+                "|---|---:|---:|---:|---:|---:|"]
         for r in e["pickup"]:
+            g = r["group_commit"]
             out.append(f"| {r['fsync']} | {r['target_rate']:,} | {r['completed_per_s']:,.0f} | "
-                       f"{lat(r['enqueue_latency_us'])} | {lat(r['pickup_latency_us'])} |")
+                       f"{lat(r['enqueue_latency_us'])} | {lat(r['pickup_latency_us'])} | "
+                       f"{g['fsync_p99_us'] / 1000:.2f} / {g['fsync_max_us'] / 1000:.1f} |")
         out.append("")
     if "memory" in e:
         out += ["### Memory per queued job", "",

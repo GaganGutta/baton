@@ -38,6 +38,7 @@
 #include <chrono>
 #include <cstdint>
 #include <cstring>
+#include <ctime>
 #include <deque>
 #include <format>
 #include <functional>
@@ -130,11 +131,17 @@ class Socket {
     return true;
   }
 
-  // Appends what arrives within `timeout_ms` (-1: wait). 1 = data, 0 = timeout,
-  // -1 = the connection is gone.
-  int receive(std::string& into, int timeout_ms) {
+  // Appends what arrives within `timeout_ns`. 1 = data, 0 = timeout, -1 = the
+  // connection is gone.
+  int receive(std::string& into, int64_t timeout_ns) {
     pollfd waiting{.fd = fd_, .events = POLLIN, .revents = 0};
-    const int ready = ::poll(&waiting, 1, timeout_ms);
+#ifdef __linux__
+    const timespec timeout{.tv_sec = static_cast<time_t>(timeout_ns / 1'000'000'000),
+                           .tv_nsec = static_cast<long>(timeout_ns % 1'000'000'000)};
+    const int ready = ::ppoll(&waiting, 1, &timeout, nullptr);
+#else
+    const int ready = ::poll(&waiting, 1, static_cast<int>((timeout_ns + 999'999) / 1'000'000));
+#endif
     if (ready == 0) return 0;
     if (ready < 0) return errno == EINTR ? 0 : -1;
     char buffer[65536];
@@ -185,18 +192,18 @@ class Connection {
   }
 
   // 1 = more bytes arrived, 0 = timeout, -1 = closed.
-  int fill(int timeout_ms) {
+  int fill(int64_t timeout_ns) {
     if (position_ > (1U << 16U)) {
       in_.erase(0, position_);
       position_ = 0;
     }
-    return socket_.receive(in_, timeout_ms);
+    return socket_.receive(in_, timeout_ns);
   }
 
   // Blocks until a reply is complete. The reply's payload is valid until the next call.
   bool read_reply(Reply& reply, int timeout_ms) {
     while (!next_buffered(reply)) {
-      if (fill(timeout_ms) <= 0) {
+      if (fill(int64_t{timeout_ms} * 1'000'000) <= 0) {
         reply.kind = Reply::Kind::kError;
         reply.error = "connection closed or timed out";
         return false;
@@ -255,16 +262,19 @@ void produce(const Options& options, int index, int producer_count, Stats& stats
       out.clear();
     }
 
-    int timeout_ms = 1'000;
+    // Wait for replies, but in open-loop mode only until the next request is due.
+    // The wait has nanosecond resolution: a generator that spins between sends
+    // would compete with the server for the CPU and show up in its latency.
+    int64_t timeout_ns = 1'000'000'000;
     if (interval_ns > 0 && !g_stopping.load(std::memory_order_relaxed)) {
       now = now_ns();
-      timeout_ms = due > now ? static_cast<int>((due - now) / 1'000'000) : 0;
+      timeout_ns = due > now ? static_cast<int64_t>(due - now) : 0;
     }
-    if (in_flight.empty() && timeout_ms > 0) {
-      std::this_thread::sleep_for(std::chrono::milliseconds(timeout_ms));
+    if (in_flight.empty() && timeout_ns > 0) {
+      std::this_thread::sleep_for(std::chrono::nanoseconds(timeout_ns));
       continue;
     }
-    if (connection.fill(timeout_ms) < 0) return stats.fail("connection closed");
+    if (connection.fill(timeout_ns) < 0) return stats.fail("connection closed");
 
     Reply reply;
     while (!in_flight.empty() && connection.next_buffered(reply)) {

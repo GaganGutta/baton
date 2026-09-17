@@ -293,6 +293,7 @@ std::string Server::build_info(std::string_view section) const {
     line("log_fsync_count", stats.syncs);
     line("log_fsync_p50_us", stats.sync_micros.percentile(0.50));
     line("log_fsync_p99_us", stats.sync_micros.percentile(0.99));
+    line("log_fsync_max_us", stats.sync_micros.max());
     line("recovery_ms", recovery_.elapsed_ms);
     line("recovered_records", recovery_.records_replayed);
     line("recovered_torn_bytes", recovery_.torn_bytes_truncated);
