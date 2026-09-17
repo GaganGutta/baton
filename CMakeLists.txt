@@ -26,6 +26,7 @@ include(BatonOptions)     # baton_options: warnings-as-errors for our targets on
 include(BatonDeps)
 
 add_subdirectory(src)
+add_subdirectory(tools)
 
 if(BATON_BUILD_TESTS)
   enable_testing()

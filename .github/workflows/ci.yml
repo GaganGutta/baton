@@ -177,4 +177,21 @@ jobs:
       - name: Build image
         run: docker build -t baton:ci .
       - name: Smoke test
-        run: docker run --rm baton:ci --version
+        run: |
+          docker run --rm baton:ci --version
+          docker run -d --name baton -p 127.0.0.1:7379:7379 baton:ci
+          python3 - <<'EOF'
+          import sys
+          sys.path.insert(0, "sdk/python/src")
+          import baton
+
+          client = baton.Client(retry_for=30)
+          job_id = client.enqueue("smoke", "hello", key="smoke-1")
+          job = client.reserve("smoke")
+          assert (job.id, job.payload) == (job_id, b"hello"), job
+          client.ack(job.id, job.token)
+          assert client.status(job_id).state == "succeeded"
+          print("enqueue, reserve and ack work through the published port")
+          EOF
+          docker exec baton baton-logcheck /var/lib/baton/data
+          docker rm -f baton

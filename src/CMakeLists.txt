@@ -9,11 +9,14 @@ configure_file(common/version.h.in "${PROJECT_BINARY_DIR}/generated/common/versi
 
 # One static library per module. Link dependencies mirror the allowed layering:
 # common <- log, sched <- state <- snapshot <- server; net depends only on common.
+# check (the offline lease model) depends on state's record types only, never on
+# State itself: it is an independent oracle.
 add_subdirectory(common)
 add_subdirectory(log)
 add_subdirectory(net)
 add_subdirectory(sched)
 add_subdirectory(state)
+add_subdirectory(check)
 add_subdirectory(snapshot)
 add_subdirectory(server)
 

@@ -56,3 +56,8 @@ baton_add_test(server_test
     server/config_test.cpp
     server/server_test.cpp
   LIBS baton_server baton_testing)
+
+baton_add_test(check_test
+  SOURCES
+    check/lease_model_test.cpp
+  LIBS baton_check baton_testing)
