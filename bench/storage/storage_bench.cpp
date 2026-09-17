@@ -66,12 +66,14 @@ class Stopwatch {
   std::chrono::steady_clock::time_point start_ = std::chrono::steady_clock::now();
 };
 
+// `run` returns what it built, and the clock is read before that is destroyed:
+// tearing down a million-job state is not part of loading one.
 template <typename F>
 double median_ms(F&& run) {
   std::vector<double> samples;
   for (int i = 0; i < kSamples; ++i) {
     const Stopwatch watch;
-    run();
+    const auto built = run();
     samples.push_back(watch.ms());
   }
   std::ranges::sort(samples);
@@ -163,6 +165,7 @@ void measure_snapshot_cost(PosixFs& fs, const std::string& root, size_t jobs, si
     const auto written = write_snapshot(fs, dir, image, engine.last_lsn(), clock.wall_now());
     BATON_CHECK(written.ok(), "write_snapshot: {}", written.error().to_string());
     info = *written;
+    return 0;
   });
 
   const double load_ms = median_ms([&] {
@@ -171,6 +174,7 @@ void measure_snapshot_cost(PosixFs& fs, const std::string& root, size_t jobs, si
     loaded->state->set_now(clock.wall_now(), clock.mono_now());
     loaded->state->end_replay(0);
     BATON_CHECK(loaded->state->job_count() == jobs, "loaded state is incomplete");
+    return loaded;
   });
 
   std::cout << std::format(
@@ -239,12 +243,13 @@ void measure_recovery(PosixFs& fs, const std::string& root, size_t jobs, size_t 
 
   const auto timed_recovery = [&](Lsn expect_snapshot) {
     return median_ms([&] {
-      const auto recovered =
+      auto recovered =
           recover_state(fs, dir, StateOptions{}, clock.wall_now(), clock.mono_now(), 0);
       BATON_CHECK(recovered.ok(), "recover_state: {}", recovered.error().to_string());
       BATON_CHECK(recovered->snapshot.lsn == expect_snapshot, "unexpected snapshot choice");
       BATON_CHECK(recovered->log.last_lsn == last_lsn, "recovery lost records");
       BATON_CHECK(recovered->state->job_count() == image.jobs.size(), "recovered another state");
+      return recovered;
     });
   };
 
