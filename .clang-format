@@ -1,0 +1,15 @@
+# Google style with a 100-column limit. CI pins clang-format 21 so that local
+# and CI formatting agree byte for byte.
+BasedOnStyle: Google
+ColumnLimit: 100
+DerivePointerAlignment: false
+PointerAlignment: Left
+IncludeBlocks: Regroup
+IncludeCategories:
+  # The related header (foo.h for foo.cpp) is placed first automatically.
+  - Regex: '^<(sys|arpa|netinet|net)/.*>$|^<(unistd|fcntl|poll|signal|dirent|pthread|netdb)\.h>$|^<(gtest|gmock|benchmark)/.*>$'
+    Priority: 1
+  - Regex: '^<.*>$'
+    Priority: 2
+  - Regex: '^".*"$'
+    Priority: 3

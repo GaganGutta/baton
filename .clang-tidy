@@ -1,0 +1,82 @@
+# Every enabled check is an error. A check is disabled only with a reason.
+Checks: >
+  -*,
+  bugprone-*,
+  cert-*,
+  clang-analyzer-*,
+  concurrency-*,
+  cppcoreguidelines-*,
+  misc-*,
+  modernize-*,
+  performance-*,
+  portability-*,
+  readability-*,
+  -bugprone-easily-swappable-parameters,
+  -cert-err58-cpp,
+  -concurrency-mt-unsafe,
+  -cppcoreguidelines-avoid-do-while,
+  -cppcoreguidelines-avoid-magic-numbers,
+  -cppcoreguidelines-macro-usage,
+  -cppcoreguidelines-pro-bounds-array-to-pointer-decay,
+  -cppcoreguidelines-pro-bounds-constant-array-index,
+  -cppcoreguidelines-pro-bounds-pointer-arithmetic,
+  -cppcoreguidelines-pro-type-reinterpret-cast,
+  -cppcoreguidelines-pro-type-union-access,
+  -cppcoreguidelines-pro-type-vararg,
+  -misc-include-cleaner,
+  -misc-non-private-member-variables-in-classes,
+  -misc-use-anonymous-namespace,
+  -modernize-use-nodiscard,
+  -modernize-use-trailing-return-type,
+  -portability-avoid-pragma-once,
+  -readability-braces-around-statements,
+  -readability-function-cognitive-complexity,
+  -readability-identifier-length,
+  -readability-magic-numbers,
+  -readability-named-parameter,
+  -readability-uppercase-literal-suffix
+
+# Why these are off:
+#  bugprone-easily-swappable-parameters   too noisy for (offset, length)-style APIs
+#  cert-err58-cpp                         flags every static with a constructor, incl. gtest internals
+#  concurrency-mt-unsafe                  flags strerror/getenv; used only on cold, single-threaded paths
+#  *-avoid-do-while, *-macro-usage        BATON_CHECK and BATON_LOG need to be macros (file/line, lazy args)
+#  *-magic-numbers                        wire/disk formats are full of meaningful literals; named where it helps
+#  *-pro-bounds-*, *-reinterpret-cast,    parsers and the sockets API require pointer arithmetic and casts;
+#  *-union-access, *-vararg                 these are confined to src/net and src/common
+#  misc-include-cleaner                   disagrees with the POSIX headers' actual symbol locations
+#  misc-non-private-member-variables-*    plain structs (records, jobs) are intentionally open data
+#  modernize-use-nodiscard                wants [[nodiscard]] on every getter; Result and Error are
+#                                         [[nodiscard]] at class level, which is where it matters
+#  modernize-use-trailing-return-type     stylistic; conflicts with the chosen style
+#  portability-avoid-pragma-once          every compiler baton targets supports #pragma once
+#  readability-braces-around-statements   single-line guards (`if (x) return;`) are allowed
+#  readability-function-cognitive-*       the command dispatcher and parsers are inherently branchy
+#  readability-identifier-length          `fd`, `n`, `it` are fine
+
+WarningsAsErrors: '*'
+HeaderFilterRegex: '.*/src/.*'
+FormatStyle: file
+
+CheckOptions:
+  - { key: readability-identifier-naming.NamespaceCase, value: lower_case }
+  - { key: readability-identifier-naming.ClassCase, value: CamelCase }
+  - { key: readability-identifier-naming.StructCase, value: CamelCase }
+  - { key: readability-identifier-naming.EnumCase, value: CamelCase }
+  - { key: readability-identifier-naming.TypeAliasCase, value: CamelCase }
+  - { key: readability-identifier-naming.FunctionCase, value: lower_case }
+  - { key: readability-identifier-naming.VariableCase, value: lower_case }
+  - { key: readability-identifier-naming.ParameterCase, value: lower_case }
+  - { key: readability-identifier-naming.PrivateMemberSuffix, value: _ }
+  - { key: readability-identifier-naming.ProtectedMemberSuffix, value: _ }
+  - { key: readability-identifier-naming.EnumConstantCase, value: CamelCase }
+  - { key: readability-identifier-naming.EnumConstantPrefix, value: k }
+  - { key: readability-identifier-naming.ConstexprVariableCase, value: CamelCase }
+  - { key: readability-identifier-naming.ConstexprVariablePrefix, value: k }
+  - { key: readability-identifier-naming.GlobalConstantCase, value: CamelCase }
+  - { key: readability-identifier-naming.GlobalConstantPrefix, value: k }
+  - { key: readability-identifier-naming.MacroDefinitionCase, value: UPPER_CASE }
+  - { key: readability-implicit-bool-conversion.AllowPointerConditions, value: true }
+  - { key: misc-const-correctness.AnalyzeValues, value: true }
+  - { key: cppcoreguidelines-special-member-functions.AllowSoleDefaultDtor, value: true }
+  - { key: cppcoreguidelines-special-member-functions.AllowMissingMoveFunctionsWhenCopyIsDeleted, value: true }
