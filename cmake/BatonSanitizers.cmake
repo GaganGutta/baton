@@ -1,6 +1,12 @@
 # Sanitizer flags are applied globally (before dependencies are added) so that
 # GoogleTest and friends are instrumented as well. TSan in particular reports
 # false positives when only part of a program is instrumented.
+# Fuzz builds instrument every library for coverage feedback; the fuzz targets
+# themselves additionally link the libFuzzer driver (see fuzz/CMakeLists.txt).
+if(BATON_BUILD_FUZZ)
+  add_compile_options(-fsanitize=fuzzer-no-link)
+endif()
+
 if(BATON_SANITIZE)
   string(REPLACE ";" "," _baton_sanitize_list "${BATON_SANITIZE}")
   add_compile_options(
