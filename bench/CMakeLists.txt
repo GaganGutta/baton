@@ -8,3 +8,8 @@ add_executable(baton_microbench
   micro/timing_wheel_bench.cpp)
 target_link_libraries(baton_microbench PRIVATE
   baton_log baton_state baton_options benchmark::benchmark benchmark::benchmark_main)
+
+# Snapshot cost and recovery time on a real file system (docs/design.md 8.6).
+# Run through bench/run_storage_bench.sh.
+add_executable(storage_bench storage/storage_bench.cpp)
+target_link_libraries(storage_bench PRIVATE baton_snapshot baton_state baton_log baton_options)

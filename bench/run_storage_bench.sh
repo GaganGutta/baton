@@ -15,7 +15,7 @@ dir="${BATON_BENCH_DIR:-build/release/storage-bench-data}"
 mkdir -p "$dir"
 
 echo "date:       $(date -u +%Y-%m-%dT%H:%MZ)"
-echo "commit:     $(git rev-parse --short HEAD 2>/dev/null || echo unknown)"
+echo "commit:     ${BATON_COMMIT:-$(git rev-parse --short HEAD 2>/dev/null || echo unknown)}"
 echo "kernel:     $(uname -sr)"
 if [ -r /proc/cpuinfo ]; then
   echo "cpu:        $(grep -m1 'model name' /proc/cpuinfo | cut -d: -f2 | xargs) ($(nproc) threads)"
@@ -23,7 +23,9 @@ else
   echo "cpu:        $(sysctl -n machdep.cpu.brand_string) ($(sysctl -n hw.ncpu) threads)"
 fi
 echo "filesystem: $(df -PT "$dir" 2>/dev/null | awk 'NR==2 {print $2 " on " $1}' || echo unknown)"
-echo "compiler:   $(grep -m1 CMAKE_CXX_COMPILER: build/release/CMakeCache.txt | cut -d= -f2)"
+compiler="$(grep -m1 CMAKE_CXX_COMPILER: build/release/CMakeCache.txt | cut -d= -f2)"
+echo "compiler:   $("$compiler" --version | head -n 1)"
+echo "build:      CMAKE_BUILD_TYPE=$(grep -m1 CMAKE_BUILD_TYPE: build/release/CMakeCache.txt | cut -d= -f2)"
 echo
 
 build/release/bench/storage_bench --dir "$dir" "$@"
