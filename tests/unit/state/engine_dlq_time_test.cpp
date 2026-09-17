@@ -207,6 +207,39 @@ TEST_F(ClockJumpTest, BackwardJumpNeverShortensALease) {
   EXPECT_NE(state_of(id), JobState::kLeased);
 }
 
+// Found by the chaos harness's log checker: the timer runs on the monotonic
+// clock, the expiry is a wall-clock time, and when the wall clock was a
+// millisecond behind, the lease was expired - and logged as expired - a
+// millisecond before the expiry the worker had been given.
+TEST_F(ClockJumpTest, ALeaseIsNeverExpiredBeforeItsWallClockExpiry) {
+  const JobId id = enqueue();
+  const auto lease = reserve("q", 10'000);
+  ASSERT_TRUE(lease.has_value());
+  clock_.jump_wall(-5);  // far below the jump detector's threshold: nobody notices
+
+  advance(10'000);  // the timer fires now, but by the wall clock 5 ms remain
+  EXPECT_EQ(state_of(id), JobState::kLeased);
+  EXPECT_TRUE(engine_.heartbeat(id, lease->token, 1'000).ok()) << "the worker is still in time";
+  EXPECT_EQ(engine_.clock_jumps_detected(), 0U);
+
+  advance(999);
+  EXPECT_EQ(state_of(id), JobState::kLeased);
+  advance(1);
+  EXPECT_EQ(state_of(id), JobState::kScheduled) << "expired, and retried after a backoff";
+
+  // And the log agrees with itself: no expiry is dated before the lease's end.
+  WallTime expires_at{};
+  for (const auto& entry : sink_.entries()) {
+    const Record record = decode_record(static_cast<uint8_t>(entry.type), entry.payload).value();
+    if (const auto* extended = std::get_if<LeaseExtended>(&record)) {
+      expires_at = extended->lease_expires_at;
+    } else if (const auto* failed = std::get_if<AttemptFailed>(&record)) {
+      EXPECT_EQ(failed->reason, FailureReason::kLeaseExpired);
+      EXPECT_GE(failed->at, expires_at);
+    }
+  }
+}
+
 TEST_F(ClockJumpTest, SlewAndSmallStepsDoNotTriggerARebuild) {
   enqueue({.queue = "q", .payload = "x", .delay_ms = 500});
   for (int i = 0; i < 1'000; ++i) {

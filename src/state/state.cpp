@@ -397,7 +397,16 @@ void State::advance_timers(std::vector<JobId>& expired_leases) {
         enter_pending(*job);
       }
     } else if (event.kind == kLeaseExpiry && job->state == JobState::kLeased) {
-      expired_leases.push_back(job->id);
+      if (job->lease_expires_at > wall_now_) {
+        // Same for leases: the expiry promised to the worker, and written to
+        // the log, is a wall-clock time, and the timer runs on the monotonic
+        // clock. They drift apart by small steps and slew, and even without
+        // either by up to a millisecond, because the two clocks tick over at
+        // different instants. Never expire a lease before its time.
+        job->timer = wheel_.schedule(mono_deadline(job->lease_expires_at), kLeaseExpiry, job->id);
+      } else {
+        expired_leases.push_back(job->id);
+      }
     }
   }
 }
