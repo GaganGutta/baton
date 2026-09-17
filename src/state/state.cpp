@@ -6,6 +6,7 @@
 
 #include "common/check.h"
 #include "common/codec.h"
+#include "state/image.h"
 
 namespace baton {
 namespace {
@@ -21,42 +22,6 @@ constexpr uint64_t kIdemNodeBytes = 96;  // list node + index node, excluding th
 uint64_t string_heap_bytes(const std::string& s) {
   static const size_t inline_capacity = std::string().capacity();
   return s.capacity() <= inline_capacity ? 0 : s.capacity() + 1;
-}
-
-// The durable part of JobState: `scheduled` and `ready` are one state on disk.
-enum class PersistedState : uint8_t { kPending = 0, kLeased, kSucceeded, kDead, kCancelled };
-
-PersistedState to_persisted(JobState s) {
-  switch (s) {
-    case JobState::kScheduled:
-    case JobState::kReady:
-      return PersistedState::kPending;
-    case JobState::kLeased:
-      return PersistedState::kLeased;
-    case JobState::kSucceeded:
-      return PersistedState::kSucceeded;
-    case JobState::kDead:
-      return PersistedState::kDead;
-    case JobState::kCancelled:
-      return PersistedState::kCancelled;
-  }
-  BATON_UNREACHABLE();
-}
-
-JobState from_persisted(PersistedState s) {
-  switch (s) {
-    case PersistedState::kPending:
-      return JobState::kScheduled;  // rebuild_derived() promotes it if it is due
-    case PersistedState::kLeased:
-      return JobState::kLeased;
-    case PersistedState::kSucceeded:
-      return JobState::kSucceeded;
-    case PersistedState::kDead:
-      return JobState::kDead;
-    case PersistedState::kCancelled:
-      return JobState::kCancelled;
-  }
-  BATON_UNREACHABLE();
 }
 
 Error mismatch(std::string what) { return Error{ErrorCode::kFailedPrecondition, std::move(what)}; }
@@ -467,59 +432,63 @@ std::vector<Queue*> State::take_ready_notifications() {
 
 // --- serialization ---------------------------------------------------------------------
 
+// A consistent copy of everything durable. This is the event-loop pause of a
+// snapshot, so it copies only what must be copied: ~100 bytes of metadata per
+// job, and a reference (not the bytes) for each payload.
+StateImage State::capture_image() const {
+  StateImage image;
+  image.next_job_id = next_job_id_;
+  image.next_token = next_token_;
+
+  std::unordered_map<const Queue*, uint32_t> queue_index;
+  image.queues.reserve(queues_.size());
+  for (const auto& [name, queue] : queues_) {
+    queue_index.emplace(queue.get(), static_cast<uint32_t>(image.queues.size()));
+    image.queues.push_back(QueueImage{.name = name, .totals = queue->totals});
+  }
+
+  image.jobs.reserve(jobs_.size());
+  for (const auto& [id, job] : jobs_) {
+    image.jobs.push_back(JobImage{.id = id,
+                                  .queue = queue_index.at(job.queue),
+                                  .payload = job.payload,
+                                  .priority = job.priority,
+                                  .attempts = job.attempts,
+                                  .max_attempts = job.max_attempts,
+                                  .backoff_base_ms = job.backoff_base_ms,
+                                  .backoff_cap_ms = job.backoff_cap_ms,
+                                  .state = to_persisted(job.state),
+                                  .run_at = job.run_at,
+                                  .created_at = job.created_at,
+                                  .finished_at = job.finished_at,
+                                  .lease_expires_at = job.lease_expires_at,
+                                  .lease_token = job.lease_token,
+                                  .idem_key = job.idem_key,
+                                  .last_error = job.last_error});
+  }
+
+  image.idem.assign(idem_order_.begin(), idem_order_.end());
+  return image;
+}
+
+// Canonical form: the image with jobs sorted by id and keys sorted by name, as
+// three length-prefixed pieces. Equal durable states give equal bytes.
 void State::serialize(std::string& out) const {
+  StateImage image = capture_image();
+  std::ranges::sort(image.jobs, {}, &JobImage::id);
+  std::ranges::sort(image.idem, {}, &IdemEntry::key);
+
   ByteWriter w(out);
   w.u8(kSerializationVersion);
-  w.varint(next_job_id_);
-  w.varint(next_token_);
-
-  // Queues in name order (std::map); jobs refer to them by position.
-  std::unordered_map<const Queue*, uint64_t> queue_index;
-  w.varint(queues_.size());
-  for (const auto& [name, queue] : queues_) {
-    queue_index.emplace(queue.get(), queue_index.size());
-    w.bytes(name);
-    w.varint(queue->totals.enqueued);
-    w.varint(queue->totals.succeeded);
-    w.varint(queue->totals.failed_attempts);
-    w.varint(queue->totals.dead);
-    w.varint(queue->totals.cancelled);
-  }
-
-  std::vector<const Job*> jobs;
-  jobs.reserve(jobs_.size());
-  for (const auto& [id, job] : jobs_) jobs.push_back(&job);
-  std::ranges::sort(jobs, {}, &Job::id);
-  w.varint(jobs.size());
-  for (const Job* job : jobs) {
-    w.varint(job->id);
-    w.varint(queue_index.at(job->queue));
-    w.bytes(job->payload.view());
-    w.svarint(job->priority);
-    w.varint(job->attempts);
-    w.varint(job->max_attempts);
-    w.varint(job->backoff_base_ms);
-    w.varint(job->backoff_cap_ms);
-    w.u8(static_cast<uint8_t>(to_persisted(job->state)));
-    w.svarint(job->run_at.ms);
-    w.svarint(job->created_at.ms);
-    w.svarint(job->finished_at.ms);
-    w.svarint(job->lease_expires_at.ms);
-    w.varint(job->lease_token);
-    w.bytes(job->idem_key);
-    w.bytes(job->last_error);
-  }
-
-  std::vector<const IdemEntry*> entries;
-  entries.reserve(idem_order_.size());
-  for (const IdemEntry& entry : idem_order_) entries.push_back(&entry);
-  std::ranges::sort(entries, {}, &IdemEntry::key);
-  w.varint(entries.size());
-  for (const IdemEntry* entry : entries) {
-    w.bytes(entry->key);
-    w.varint(entry->job_id);
-    w.svarint(entry->expires_at.ms);
-  }
+  std::string piece;
+  encode_image_meta(image, piece);
+  w.bytes(piece);
+  piece.clear();
+  encode_image_jobs(image.jobs, piece);
+  w.bytes(piece);
+  piece.clear();
+  encode_image_idem(image.idem, piece);
+  w.bytes(piece);
 }
 
 Result<std::unique_ptr<State>> State::deserialize(std::string_view data, StateOptions options) {
@@ -528,101 +497,17 @@ Result<std::unique_ptr<State>> State::deserialize(std::string_view data, StateOp
   };
   ByteReader r(data);
   if (r.u8() != kSerializationVersion || !r.ok()) return corrupt("unknown version");
-
-  auto state = std::make_unique<State>(options);
-  state->replaying_ = true;
-  state->next_job_id_ = r.varint();
-  state->next_token_ = r.varint();
-
-  std::vector<Queue*> queue_by_index;
-  const uint64_t queue_count = r.varint();
-  if (queue_count > r.remaining()) return corrupt("queue count exceeds input");
-  for (uint64_t i = 0; i < queue_count; ++i) {
-    const std::string_view name = r.bytes();
-    if (!r.ok() || name.empty()) return corrupt("bad queue name");
-    if (state->find_queue(name) != nullptr) return corrupt("duplicate queue");
-    Queue& queue = state->get_or_create_queue(name);
-    queue.totals.enqueued = r.varint();
-    queue.totals.succeeded = r.varint();
-    queue.totals.failed_attempts = r.varint();
-    queue.totals.dead = r.varint();
-    queue.totals.cancelled = r.varint();
-    queue_by_index.push_back(&queue);
-  }
-
-  const uint64_t job_count = r.varint();
-  if (job_count > r.remaining()) return corrupt("job count exceeds input");
-  for (uint64_t i = 0; i < job_count; ++i) {
-    const JobId id = r.varint();
-    const uint64_t queue = r.varint();
-    if (!r.ok() || id == 0 || id >= state->next_job_id_) return corrupt("bad job id");
-    if (queue >= queue_by_index.size()) return corrupt("job refers to an unknown queue");
-    const auto [it, inserted] = state->jobs_.try_emplace(id);
-    if (!inserted) return corrupt("duplicate job id");
-
-    Job& job = it->second;
-    job.id = id;
-    job.queue = queue_by_index[static_cast<size_t>(queue)];
-    job.payload = SharedBytes(r.bytes());
-    const int64_t priority = r.svarint();
-    const uint64_t attempts = r.varint();
-    const uint64_t max_attempts = r.varint();
-    const uint64_t backoff_base = r.varint();
-    const uint64_t backoff_cap = r.varint();
-    const uint8_t persisted = r.u8();
-    if (priority < INT32_MIN || priority > INT32_MAX || attempts > UINT32_MAX ||
-        max_attempts > UINT32_MAX || backoff_base > UINT32_MAX || backoff_cap > UINT32_MAX ||
-        persisted > static_cast<uint8_t>(PersistedState::kCancelled)) {
-      return corrupt("job field out of range");
-    }
-    job.priority = static_cast<int32_t>(priority);
-    job.attempts = static_cast<uint32_t>(attempts);
-    job.max_attempts = static_cast<uint32_t>(max_attempts);
-    job.backoff_base_ms = static_cast<uint32_t>(backoff_base);
-    job.backoff_cap_ms = static_cast<uint32_t>(backoff_cap);
-    job.state = from_persisted(static_cast<PersistedState>(persisted));
-    job.run_at = WallTime{r.svarint()};
-    job.created_at = WallTime{r.svarint()};
-    job.finished_at = WallTime{r.svarint()};
-    job.lease_expires_at = WallTime{r.svarint()};
-    job.lease_token = r.varint();
-    job.idem_key = std::string(r.bytes());
-    job.last_error = std::string(r.bytes());
-    if (!r.ok()) return corrupt("truncated job");
-    for (const WallTime t : {job.run_at, job.created_at, job.finished_at, job.lease_expires_at}) {
-      if (t.ms < 0 || t.ms > kMaxWallTimeMs) return corrupt("job timestamp out of range");
-    }
-    if (job.lease_token >= state->next_token_) return corrupt("bad lease token");
-    if ((job.state == JobState::kLeased) != (job.lease_token != 0)) {
-      return corrupt("lease token does not match job state");
-    }
-    if (job.attempts > job.max_attempts) return corrupt("job has more attempts than allowed");
-    // Keep the bookkeeping that apply() maintains during replay in step.
-    ++job.queue->counts[static_cast<size_t>(job.state)];
-    if (job.state == JobState::kDead) job.queue->dead.insert(id);
-    state->memory_bytes_ += job_bytes(job);
-  }
-
-  const uint64_t idem_count = r.varint();
-  if (idem_count > r.remaining()) return corrupt("idempotency count exceeds input");
-  for (uint64_t i = 0; i < idem_count; ++i) {
-    const std::string_view key = r.bytes();
-    const JobId job_id = r.varint();
-    const WallTime expires_at{r.svarint()};
-    if (!r.ok() || key.empty()) return corrupt("bad idempotency entry");
-    if (expires_at.ms < 0 || expires_at.ms > kMaxWallTimeMs) {
-      return corrupt("idempotency expiry out of range");
-    }
-    if (state->find_idem(key) != nullptr) return corrupt("duplicate idempotency key");
-    state->upsert_idem(key, job_id, expires_at);
-  }
+  const std::string_view meta = r.bytes();
+  const std::string_view jobs = r.bytes();
+  const std::string_view idem = r.bytes();
   if (!r.ok()) return corrupt("truncated");
   if (!r.at_end()) return corrupt("trailing bytes");
 
-  // Collection order is expiry order.
-  state->idem_order_.sort(
-      [](const IdemEntry& a, const IdemEntry& b) { return a.expires_at < b.expires_at; });
-  return state;
+  StateBuilder builder(options);
+  BATON_RETURN_IF_ERROR(builder.add_meta(meta));
+  BATON_RETURN_IF_ERROR(builder.add_jobs(jobs));
+  BATON_RETURN_IF_ERROR(builder.add_idem(idem));
+  return builder.finish();
 }
 
 // --- invariants ------------------------------------------------------------------------

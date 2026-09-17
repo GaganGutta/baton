@@ -40,6 +40,8 @@
 
 namespace baton {
 
+struct StateImage;
+
 inline constexpr size_t kJobStateCount = 6;
 
 struct QueueTotals {
@@ -140,6 +142,11 @@ class State {
   const StateOptions& options() const { return options_; }
 
   // --- persistence and verification ---------------------------------------------
+  // A self-contained copy of the durable state (state/image.h), safe to hand to
+  // another thread. This is the only part of a snapshot that runs on the event
+  // loop; its cost is what `snapshot pause` means.
+  StateImage capture_image() const;
+
   // Canonical encoding of the durable state: equal states give equal bytes.
   // The body of a snapshot (M5) and the oracle of the replay-equivalence tests.
   void serialize(std::string& out) const;
@@ -152,6 +159,8 @@ class State {
   Status check_invariants() const;
 
  private:
+  friend class StateBuilder;  // rebuilds a State from an encoded image
+
   struct FinishedRef {
     JobId id = 0;
     WallTime finished_at;

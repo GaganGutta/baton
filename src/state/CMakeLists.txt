@@ -1,5 +1,6 @@
 add_library(baton_state STATIC
   engine.cpp
+  image.cpp
   ready_heap.cpp
   records.cpp
   state.cpp)
