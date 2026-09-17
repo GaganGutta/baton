@@ -18,6 +18,7 @@ Contents:
 8. [M5 — Snapshots and log compaction](#8-m5--snapshots-and-log-compaction)
 9. [M6 — The Python SDK](#9-m6--the-python-sdk)
 10. [M7 — The chaos harness](#10-m7--the-chaos-harness)
+11. [M8 — Measuring](#11-m8--measuring)
 
 ---
 
@@ -1555,6 +1556,84 @@ part was the one that shares no code with the server.
   at-least-once, as section 9.4 says; the harness reports how often handlers
   really ran more than once so that the number is not abstract.
 
+## 11. M8 — Measuring
+
+The rule is that every number in the README comes from a script in `bench/` and
+that unflattering numbers stay in. This section is about making the numbers
+mean something.
+
+### 11.1 What is measured, and with what
+
+`bench/loadgen` is a load generator written for this purpose, because the
+questions are specific: what does *waiting for the disk* cost, what does group
+commit buy back, and how long does a job wait for a worker. It speaks baton's
+protocol and — for the comparison — Beanstalkd's and Faktory's, so all three
+are driven by the same code, threads, clocks and histograms.
+
+- **Closed loop** (each connection keeps `--depth` requests in flight) finds
+  capacity. It says nothing trustworthy about latency: when the server slows
+  down, a closed-loop generator politely sends less.
+- **Open loop** (`--rate`) sends on a fixed schedule and measures each request
+  from the moment it was *due*. A server that stalls for 100 ms is charged for
+  every request that should have been sent meanwhile — the correction for what
+  Gil Tene named coordinated omission. The generator waits with nanosecond
+  timeouts (`ppoll`) rather than spinning, so that it does not compete with the
+  server for the CPU it is measuring.
+- **Pickup latency** travels in the payload: the producer stamps the due time,
+  the worker subtracts it on receipt. Both ends are one process, one clock.
+- **Histograms** are log-linear (`common/histogram.h`, at most 3% high, tested
+  against sorted arrays), one per thread, merged at the end; nothing is recorded
+  during warm-up.
+- **Server-side numbers ride along**: the group-commit batch sizes and the
+  `fdatasync` p50/p99/max that the server itself observed during each run are
+  printed next to the client-side figures. Under `--fsync always` throughput at
+  low connection counts *is* the disk's fsync latency, and tail latency *is* its
+  fsync tail; the tables are meant to show that, not leave it to faith.
+
+Every experiment starts a fresh server on an empty data directory on a real
+file system; the machine, kernel, file system, compiler, commit and date are
+printed with the results.
+
+### 11.2 A fair comparison
+
+"Jobs per second" without "and what survives a power cut" compares nothing, so
+the comparison is grouped by what an acknowledgement means:
+
+| Group | baton | Beanstalkd | Faktory |
+|---|---|---|---|
+| fsync before every acknowledgement | `--fsync always` | `-b … -f 0` | not available |
+| fsync every 50 ms | `--fsync interval --fsync-interval 50ms` | `-b … -f 50` (its default) | not available |
+| snapshots only | not available | — | its defaults: embedded Redis, RDB `save 30 5` / `save 120 1`, no AOF |
+
+All three run the same way — in a container, on the host's network (no
+port-mapping proxy in the path), data on a fresh named volume on the same disk
+— and are driven from the host. Faktory has no setting that matches either of
+the first two groups, so it stands alone, labelled with what its
+acknowledgement means: a crash can lose up to 30 seconds of acknowledged jobs.
+It is in the table because people will compare anyway, and it is *expected* to
+win on raw throughput: it does no disk I/O per job and runs on many cores.
+
+What "end to end" costs differs too, and the docs say so: baton makes three
+things durable per job (enqueue, lease, acknowledgement); Beanstalkd logs the
+put and the delete but not the reserve; Faktory none of them.
+
+### 11.3 Limitations
+
+- **One machine, a laptop, under WSL2.** Load generator and server share 16
+  hardware threads; the disk is a virtual disk whose `fdatasync` takes 2–4 ms
+  and occasionally 50–300 ms. Absolute numbers will differ elsewhere — faster
+  fsync moves every `always` row — but what grows with what should carry over.
+- **Short runs** (10 s after 2 s of warm-up) on a fresh server: no long-term
+  effects such as snapshots of a large state (section 8 measures those
+  separately), fragmentation or page-cache pressure.
+- **A closed-loop generator with one thread per connection** tops out at a few
+  hundred connections; baton's 10,000-connection limit is tested for
+  correctness, not measured for throughput.
+- **Payloads are 256 bytes** unless stated. Larger payloads shift the cost from
+  fsync count to bytes written.
+- **The competitors run with the settings in `bench/compare/run_compare.py`
+  and nothing else was tuned** — for any of the three, baton included.
+
 ---
 
 ## Credits
@@ -1568,3 +1647,15 @@ uses them. So far:
   delete / release / bury, time-to-run — follows **Beanstalkd**; the idea of a
   language-agnostic job server with a dead set follows **Faktory**; durable
   workflow replay follows **Temporal**.
+- Aborting on a failed `fsync` instead of retrying it follows the lesson
+  PostgreSQL drew from "fsyncgate" (section 4.3). Hierarchical timing wheels are
+  from Varghese & Lauck (section 5.7). Fencing tokens as described by Martin
+  Kleppmann (section 5.4). Snapshot by fork is what **Redis** does and the
+  reason section 8.1 discusses it; the two-snapshots-then-compact rule is
+  baton's own.
+- Log-linear latency histograms follow Gil Tene's **HdrHistogram**, and
+  measuring open-loop latency from the intended send time is his correction for
+  "coordinated omission" (section 11.1).
+- The chaos harness's approach — real processes, kill them, check invariants
+  from the evidence, and test the checker with planted bugs — owes its attitude
+  to **Jepsen**.
