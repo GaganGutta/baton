@@ -52,6 +52,9 @@ worker.run()   # until SIGTERM or SIGINT
 - **SIGTERM** stops taking jobs and lets running handlers finish for up to
   `shutdown_timeout` seconds. Whatever is still running then is redelivered
   after its lease expires — exactly as after a crash.
+- **`Worker(on_result=callback)`** reports every delivery once it is settled:
+  `callback(job, "acked" | "failed" | "lease_lost" | "unreported")` — for metrics
+  and audit logs.
 - Threads, so handlers should be I/O-bound. For CPU-bound work run more worker
   processes; the server does not mind.
 

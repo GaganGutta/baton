@@ -89,7 +89,12 @@ class Worker:
         shutdown_timeout: float = 30.0,
         name: str = "baton-worker",
         logger: Optional[logging.Logger] = None,
+        on_result: Optional[Callable[["JobContext", str], None]] = None,
     ) -> None:
+        """``on_result(job, outcome)`` is called once per delivery, on the worker thread,
+        after the server has been told (or could not be): ``"acked"``, ``"failed"``,
+        ``"lease_lost"`` (the result was discarded) or ``"unreported"`` (the server
+        could not be reached; the lease will expire). For metrics and audit logs."""
         self.queues = [queues] if isinstance(queues, str) else list(queues)
         if not self.queues:
             raise ValueError("a worker needs at least one queue")
@@ -104,6 +109,7 @@ class Worker:
         self.shutdown_timeout = shutdown_timeout
         self.name = name
         self.log = logger or logging.getLogger("baton.worker")
+        self._on_result = on_result
 
         self._tasks: Dict[str, Callable[..., Any]] = {}
         self._raw_handlers: Dict[str, Callable[[JobContext], Any]] = {}
@@ -277,11 +283,13 @@ class Worker:
         try:
             client.ack(context.id, context.token)
             self._count("succeeded")
+            self._notify(context, "acked")
         except (StaleLease, NotFound):
             self._discard(context, "finished")
         except BatonError as error:
             self.log.error("job %d: could not ack (%s); it will be delivered again", context.id,
                            error)
+            self._notify(context, "unreported")
 
     def _report_failure(self, client: Client, context: JobContext, message: str,
                         **options: Any) -> None:
@@ -293,16 +301,27 @@ class Worker:
             self._count("failed")
             self.log.info("job %d: attempt %d failed (%s): %s", context.id, context.attempt,
                           message, result.outcome)
+            self._notify(context, "failed")
         except (StaleLease, NotFound):
             self._discard(context, "failed")
         except BatonError as error:
             self.log.error("job %d: could not report the failure (%s); the lease will expire",
                            context.id, error)
+            self._notify(context, "unreported")
 
     def _discard(self, context: JobContext, what: str) -> None:
         self._count("lease_lost")
         self.log.warning("job %d %s after its lease was lost; the result is discarded (the job "
                          "was cancelled or belongs to another worker now)", context.id, what)
+        self._notify(context, "lease_lost")
+
+    def _notify(self, context: JobContext, outcome: str) -> None:
+        if self._on_result is None:
+            return
+        try:
+            self._on_result(context, outcome)
+        except Exception:  # an observer must not be able to break the worker
+            self.log.exception("on_result raised for job %d", context.id)
 
     # --- heartbeats --------------------------------------------------------------------------
 

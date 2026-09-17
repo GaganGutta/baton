@@ -123,6 +123,31 @@ def test_retry_fatal_and_unknown_tasks(server, client):
     assert "not a task envelope" in client.status(garbage_id).last_error
 
 
+def test_on_result_reports_every_delivery_once(server, client):
+    outcomes = []
+    worker = make_worker(server, lease_ms=600,
+                         on_result=lambda job, outcome: outcomes.append((job.id, outcome)))
+
+    @worker.task()
+    def fine():
+        pass
+
+    @worker.task()
+    def broken():
+        raise baton.Fatal("no")
+
+    @worker.task()
+    def cancelled_under_me():
+        baton.current_job().wait_lease_lost(20)
+
+    ids = [client.enqueue_task("q", name) for name in ("fine", "broken", "cancelled_under_me")]
+    with running(worker):
+        wait_until(lambda: client.status(ids[2]).state == "leased", what="the third job")
+        client.cancel(ids[2])
+        wait_until(lambda: len(outcomes) == 3, what="three outcomes")
+    assert sorted(outcomes) == [(ids[0], "acked"), (ids[1], "failed"), (ids[2], "lease_lost")]
+
+
 def test_raw_handlers_get_the_job_itself(server, client):
     worker = make_worker(server, queues=["blobs"])
     seen = []
