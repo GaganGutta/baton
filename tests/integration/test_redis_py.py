@@ -62,9 +62,12 @@ def test_errors_carry_machine_readable_codes(server, options):
     r.execute_command("ENQUEUE", "q", "x")
     _, token, *_ = r.execute_command("RESERVE", 0, 1000, "q")
     r.execute_command("ACK", 1, token)
+    assert r.execute_command("ACK", 1, token) in (b"OK", "OK"), "the same ACK again is fine"
 
     with pytest.raises(redis.ResponseError, match=r"^STALE "):
-        r.execute_command("ACK", 1, token)
+        r.execute_command("ACK", 1, token + 1)
+    with pytest.raises(redis.ResponseError, match=r"^STALE "):
+        r.execute_command("HEARTBEAT", 1, token)
     with pytest.raises(redis.ResponseError, match=r"^NOTFOUND "):
         r.execute_command("STATUS", 999)
     with pytest.raises(redis.ResponseError, match=r"^STATE "):

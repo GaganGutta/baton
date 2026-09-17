@@ -30,7 +30,9 @@ def test_basic_session(server):
     assert status[status.index("state") + 1] == "scheduled"
 
     assert cli(server, "ACK", "1", "1") == "OK"
-    assert cli(server, "ACK", "1", "1").startswith("STALE")
+    assert cli(server, "ACK", "1", "1") == "OK", "repeating the ACK that counted is fine"
+    assert cli(server, "ACK", "1", "2").startswith("STALE"), "any other token is not"
+    assert cli(server, "HEARTBEAT", "1", "1").startswith("STALE")
     assert cli(server, "RESERVE", "0", "30000", "emails") == ""  # nil
 
 
