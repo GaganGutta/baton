@@ -95,6 +95,21 @@ jobs:
       - name: Test
         run: ctest --preset tidy
 
+  integration:
+    name: integration (redis-cli, redis-py, kill -9)
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install tools
+        run: |
+          sudo apt-get update -qq && sudo apt-get install -y -qq ninja-build redis-tools
+          python3 -m venv "$HOME/venv"
+          "$HOME/venv/bin/pip" install --quiet pytest redis
+      - name: Build
+        run: cmake --preset release && cmake --build --preset release --target baton
+      - name: Test the real binary with stock Redis clients
+        run: BATON_BIN=build/release/src/server/baton "$HOME/venv/bin/python" -m pytest tests/integration -q
+
   fuzz:
     name: fuzz (short run)
     runs-on: ubuntu-24.04
