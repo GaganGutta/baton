@@ -23,3 +23,8 @@ baton_add_test(log_test
     log/log_writer_test.cpp
     log/recovery_test.cpp
   LIBS baton_log baton_testing)
+
+baton_add_test(sched_test
+  SOURCES
+    sched/timing_wheel_test.cpp
+  LIBS baton_sched)
