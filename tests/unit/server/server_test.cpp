@@ -105,7 +105,9 @@ TEST_F(ServerTest, JobLifecycleOverTheWire) {
 
   EXPECT_TRUE(StartsWith(worker.command({"HEARTBEAT", "1", "1", "60000"}), ":17"));
   EXPECT_EQ(worker.command({"ACK", "1", "1"}), "+OK");
-  EXPECT_TRUE(StartsWith(worker.command({"ACK", "1", "1"}), "-STALE"));
+  EXPECT_EQ(worker.command({"ACK", "1", "1"}), "+OK") << "repeating the ACK that counted is fine";
+  EXPECT_TRUE(StartsWith(worker.command({"ACK", "1", "2"}), "-STALE")) << "any other token is not";
+  EXPECT_TRUE(StartsWith(worker.command({"HEARTBEAT", "1", "1"}), "-STALE"));
   EXPECT_EQ(worker.command({"ACK", "99", "1"}), "-NOTFOUND no such job: 99");
 
   const std::string stats = producer.command({"STATS", "emails"});

@@ -12,14 +12,7 @@ import time
 from dataclasses import dataclass, field
 from typing import Any, Dict, Iterable, List, Mapping, Optional, Sequence, Tuple, Union
 
-from .errors import (
-    ConnectionLost,
-    EnqueueUncertain,
-    NotFound,
-    ProtocolError,
-    StaleLease,
-    error_from_reply,
-)
+from .errors import ConnectionLost, EnqueueUncertain, ProtocolError, error_from_reply
 from .resp import Connection, ServerError
 
 Payload = Union[bytes, str]
@@ -147,7 +140,6 @@ class Client:
         )
         self._timeout = timeout
         self._retry_for = retry_for
-        self._repeated = False  # did the last _call() resend a request that may have run?
 
     def __enter__(self) -> "Client":
         return self
@@ -162,13 +154,14 @@ class Client:
 
     def _call(
         self, *args: Union[str, bytes, int], repeatable: bool, timeout: Optional[float] = None
-    ) -> Tuple[Any, bool]:
-        """Returns (reply, repeated): ``repeated`` is True if the request was sent
-        again after an attempt that the server may have executed."""
+    ) -> Any:
+        """Sends a request and returns its reply, raising server errors as exceptions.
+
+        ``repeatable``: the request may be sent again after an attempt that the
+        server may have executed. Attempts that certainly were not executed are
+        always repeated, for up to ``retry_for`` seconds."""
         deadline = time.monotonic() + self._retry_for
         delay = 0.05
-        repeated = False
-        self._repeated = False
         while True:
             try:
                 if not self._connection.connected:
@@ -179,11 +172,9 @@ class Client:
                     raise
                 if time.monotonic() + delay > deadline:
                     raise
-                repeated = repeated or error.maybe_executed
-                self._repeated = repeated
             else:
                 if not isinstance(reply, ServerError):
-                    return reply, repeated
+                    return reply
                 # A server that is shutting down has executed nothing: come back later.
                 if reply.code != "UNAVAILABLE" or time.monotonic() + delay > deadline:
                     raise error_from_reply(reply.code, reply.message)
@@ -225,7 +216,7 @@ class Client:
         if key is not None:
             args += ["KEY", key]
         try:
-            reply, _ = self._call(*args, repeatable=key is not None)
+            reply = self._call(*args, repeatable=key is not None)
         except ConnectionLost as error:
             if error.maybe_executed and key is None:
                 raise EnqueueUncertain(
@@ -253,7 +244,7 @@ class Client:
     ) -> Optional[Job]:
         """Leases the next job, waiting up to ``timeout_ms`` for one. None on timeout."""
         names = [queues] if isinstance(queues, str) else list(queues)
-        reply, _ = self._call(
+        reply = self._call(
             "RESERVE", timeout_ms, lease_ms, *names,
             repeatable=True,  # a lease lost with its reply simply expires (at-least-once)
             timeout=self._timeout + timeout_ms / 1000.0,
@@ -272,24 +263,14 @@ class Client:
         args: List[Union[str, int]] = ["HEARTBEAT", job_id, token]
         if lease_ms is not None:
             args.append(lease_ms)
-        reply, _ = self._call(*args, repeatable=True)
+        reply = self._call(*args, repeatable=True)
         return int(reply)
 
     def ack(self, job_id: int, token: int) -> None:
         """Marks the job succeeded. Once this returns it is never delivered again."""
-        try:
-            self._call("ACK", job_id, token, repeatable=True)
-        except StaleLease:
-            if not self._repeated:
-                raise  # the lease is gone: expired, cancelled or taken over
-            # The ACK was sent twice because the connection failed in between.
-            # If the first one arrived, it is what made the token stale.
-            try:
-                acknowledged = self.status(job_id).state == "succeeded"
-            except NotFound:
-                acknowledged = False
-            if not acknowledged:
-                raise
+        # Safe to repeat after a connection failure: the server answers OK again to
+        # the one token whose ACK completed the job, and STALE to any other.
+        self._call("ACK", job_id, token, repeatable=True)
 
     def fail(
         self,
@@ -308,7 +289,7 @@ class Client:
             args += ["RETRYIN", retry_in_ms]
         if no_retry:
             args.append("NORETRY")
-        reply, _ = self._call(*args, repeatable=True)
+        reply = self._call(*args, repeatable=True)
         return FailResult(outcome=_text(reply[0]), retry_at=int(reply[1]))
 
     # --- inspecting and operating -----------------------------------------------------
@@ -320,45 +301,45 @@ class Client:
         args: List[Union[str, int]] = ["STATUS", job_id]
         if payload:
             args.append("PAYLOAD")
-        reply, _ = self._call(*args, repeatable=True)
+        reply = self._call(*args, repeatable=True)
         return _status(reply)
 
     def stats(self, queue: str) -> QueueStats:
-        reply, _ = self._call("STATS", queue, repeatable=True)
+        reply = self._call("STATS", queue, repeatable=True)
         return _queue_stats(reply)
 
     def all_stats(self) -> List[QueueStats]:
-        reply, _ = self._call("STATS", repeatable=True)
+        reply = self._call("STATS", repeatable=True)
         return [_queue_stats(entry) for entry in reply]
 
     def dlq_list(self, queue: str, offset: int = 0, count: int = 100) -> List[JobStatus]:
-        reply, _ = self._call("DLQ.LIST", queue, offset, count, repeatable=True)
+        reply = self._call("DLQ.LIST", queue, offset, count, repeatable=True)
         return [_status(entry) for entry in reply]
 
     def dlq_retry(self, job_id: int) -> None:
         self._call("DLQ.RETRY", job_id, repeatable=True)
 
     def dlq_retry_all(self, queue: str) -> int:
-        reply, _ = self._call("DLQ.RETRY", queue, "ALL", repeatable=True)
+        reply = self._call("DLQ.RETRY", queue, "ALL", repeatable=True)
         return int(reply)
 
     def dlq_purge(self, job_id: int) -> None:
         self._call("DLQ.PURGE", job_id, repeatable=True)
 
     def dlq_purge_all(self, queue: str) -> int:
-        reply, _ = self._call("DLQ.PURGE", queue, "ALL", repeatable=True)
+        reply = self._call("DLQ.PURGE", queue, "ALL", repeatable=True)
         return int(reply)
 
     def snapshot(self) -> None:
         self._call("SNAPSHOT", repeatable=True)
 
     def ping(self) -> bool:
-        reply, _ = self._call("PING", repeatable=True)
+        reply = self._call("PING", repeatable=True)
         return reply == "PONG"
 
     def info(self, section: Optional[str] = None) -> Dict[str, Union[int, str]]:
         args = ["INFO"] + ([section] if section else [])
-        reply, _ = self._call(*args, repeatable=True)
+        reply = self._call(*args, repeatable=True)
         result: Dict[str, Union[int, str]] = {}
         for line in _text(reply).splitlines():
             if not line or line.startswith("#"):

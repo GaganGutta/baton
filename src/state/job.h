@@ -32,6 +32,11 @@ constexpr bool is_pending(JobState s) { return s == JobState::kScheduled || s ==
 constexpr bool is_terminal(JobState s) {
   return s == JobState::kSucceeded || s == JobState::kDead || s == JobState::kCancelled;
 }
+// States in which Job::lease_token is set: the current lease, or the lease that
+// completed the job.
+constexpr bool holds_token(JobState s) {
+  return s == JobState::kLeased || s == JobState::kSucceeded;
+}
 
 // Why an attempt ended without success.
 enum class FailureReason : uint8_t {
@@ -56,7 +61,9 @@ struct Job {
   WallTime created_at;
   WallTime finished_at;  // when the job reached a terminal state
   WallTime lease_expires_at;
-  LeaseToken lease_token = 0;  // current lease, 0 if none
+  // The current lease while leased; once succeeded, the token of the lease that
+  // completed the job (so that a repeated ACK can be recognized); otherwise 0.
+  LeaseToken lease_token = 0;
   std::string idem_key;
   std::string last_error;
 

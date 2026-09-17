@@ -149,7 +149,8 @@ void State::finish(Job& job, JobState terminal, WallTime at) {
   leave_indexes(job);
   set_state(job, terminal);
   job.finished_at = at;
-  job.lease_token = 0;
+  // A succeeded job remembers the token that completed it: see Engine::ack().
+  if (terminal != JobState::kSucceeded) job.lease_token = 0;
   if (terminal == JobState::kDead) {
     job.queue->dead.insert(job.id);
     dead_gc_.push_back(FinishedRef{.id = job.id, .finished_at = at});
@@ -560,7 +561,7 @@ Status State::check_invariants() const {
       return broken(
           std::format("job {} is {} but DLQ membership is {}", id, to_string(job.state), in_dead));
     }
-    if ((job.state == JobState::kLeased) != (job.lease_token != 0)) {
+    if (holds_token(job.state) != (job.lease_token != 0)) {
       return broken(std::format("job {} is {} with lease token {}", id, to_string(job.state),
                                 job.lease_token));
     }

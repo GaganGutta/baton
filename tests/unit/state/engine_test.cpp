@@ -203,11 +203,53 @@ TEST_F(EngineTest, AckCompletesTheJobExactlyOnce) {
   EXPECT_EQ(state_.find_job(id)->finished_at, clock_.wall_now());
   EXPECT_EQ(state_.find_queue("q")->totals.succeeded, 1U);
 
-  const Status again = engine_.ack(id, lease->token);
-  ASSERT_FALSE(again.ok());
-  EXPECT_EQ(again.error().code(), ErrorCode::kStaleToken);
   EXPECT_EQ(engine_.ack(999, 1).error().code(), ErrorCode::kNotFound);
   EXPECT_FALSE(reserve().has_value()) << "a finished job is never handed out again";
+}
+
+// A client whose connection died between sending ACK and reading the reply
+// sends it again. The answer tells it exactly whether its ACK counted.
+TEST_F(EngineTest, AckIsIdempotentForTheTokenThatCompletedTheJobAndOnlyForIt) {
+  const JobId id = enqueue({.queue = "q", .payload = "x", .backoff_base_ms = 0});
+  const auto first = reserve("q", 1'000);
+  ASSERT_TRUE(first.has_value());
+  advance(1'000);  // the first lease expires...
+  const auto second = reserve("q", 1'000);
+  ASSERT_TRUE(second.has_value());
+  ASSERT_TRUE(engine_.ack(id, second->token).ok());  // ...and the second one completes the job
+
+  const size_t records = sink_.entries().size();
+  const WallTime finished_at = state_.find_job(id)->finished_at;
+  advance(50);
+  EXPECT_TRUE(engine_.ack(id, second->token).ok()) << "the same ACK again: it did count";
+  EXPECT_TRUE(engine_.ack(id, second->token).ok());
+  EXPECT_EQ(sink_.entries().size(), records) << "and repeating it changes and logs nothing";
+  EXPECT_EQ(state_.find_job(id)->finished_at, finished_at);
+  EXPECT_EQ(state_.find_queue("q")->totals.succeeded, 1U);
+
+  // Nobody else may conclude that *their* ACK was the one.
+  EXPECT_EQ(engine_.ack(id, first->token).error().code(), ErrorCode::kStaleToken);
+  EXPECT_EQ(engine_.ack(id, second->token + 1).error().code(), ErrorCode::kStaleToken);
+  // It is ACK that is idempotent, not the lease that lives on.
+  EXPECT_EQ(engine_.heartbeat(id, second->token, 1'000).error().code(), ErrorCode::kStaleToken);
+  EXPECT_EQ(engine_.fail({.id = id, .token = second->token}).error().code(),
+            ErrorCode::kStaleToken);
+}
+
+TEST_F(EngineTest, OnlySucceededJobsRememberAToken) {
+  const JobId cancelled = enqueue();
+  const auto lease = reserve();
+  ASSERT_TRUE(lease.has_value());
+  ASSERT_TRUE(engine_.cancel(cancelled).ok());
+  EXPECT_EQ(engine_.ack(cancelled, lease->token).error().code(), ErrorCode::kStaleToken);
+  EXPECT_EQ(state_.find_job(cancelled)->lease_token, 0U);
+
+  const JobId dead = enqueue({.queue = "q", .payload = "x", .max_attempts = 1});
+  const auto doomed = reserve();
+  ASSERT_TRUE(doomed.has_value());
+  ASSERT_TRUE(engine_.fail({.id = dead, .token = doomed->token, .error = "boom"}).ok());
+  EXPECT_EQ(state_.find_job(dead)->lease_token, 0U);
+  EXPECT_EQ(engine_.ack(dead, doomed->token).error().code(), ErrorCode::kStaleToken);
 }
 
 // The fencing guarantee: once a job has been leased again, the previous holder

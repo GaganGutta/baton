@@ -101,9 +101,11 @@ use.
   not executed until it returns. Use separate connections for producers and
   for each concurrently blocked worker.
 - If the connection drops after a request was sent but before the reply
-  arrived, the client cannot know whether it was executed. `ENQUEUE` with a
-  `KEY` is safe to retry; `ACK`, `FAIL`, `CANCEL` are idempotent in effect (a
-  retry gets `STALE`/`STATE`); see `docs/guarantees.md`.
+  arrived, the client cannot know whether it was executed. All of these are
+  safe to send again: `ENQUEUE` with a `KEY` returns the first attempt's job;
+  `ACK` answers `+OK` again to the token that completed the job; `FAIL` and
+  `CANCEL` cannot take effect twice (the retry gets `STALE` / `STATE`).
+  `ENQUEUE` without a `KEY` is the one command that is not.
 
 ## Limits
 
@@ -206,6 +208,13 @@ ACK <job_id> <token>
 
 Marks the job succeeded. Reply: `+OK`. Once the reply is received the job will
 never be delivered again.
+
+`ACK` is idempotent for the one token that completed the job: repeating it
+answers `+OK` again (and changes nothing) for as long as the finished job is
+retained. Any other token gets `STALE`. So a worker whose connection died
+between sending `ACK` and reading the reply can simply send it again, and the
+answer tells it exactly whether its `ACK` counted — `+OK` — or whether the job
+was completed, cancelled or taken over by someone else — `STALE`.
 
 Errors: `ERR`, `NOTFOUND`, `STALE`.
 

@@ -191,10 +191,18 @@ class ModelRun {
     if (pool.empty()) return;
     const size_t index = pick(pool.size());
     const Held held = pool[index];
+    const bool acking = pick(2) == 0;
     const bool should_work = is_current(held);
+    // ACK is idempotent for the one token that completed the job, for as long
+    // as the finished job is remembered; it then changes nothing.
+    const auto acked = acked_by_.find(held.id);
+    const bool repeats_its_own_ack = acking && !should_work && acked != acked_by_.end() &&
+                                     acked->second == held.token &&
+                                     state_.find_job(held.id) != nullptr;
+    const size_t records_before = sink_.entries().size();
 
     Status outcome;
-    if (pick(2) == 0) {
+    if (acking) {
       outcome = engine_.ack(held.id, held.token);
     } else {
       const auto failed = engine_.fail(
@@ -205,8 +213,13 @@ class ModelRun {
     if (should_work) {
       ASSERT_TRUE(outcome.ok()) << "the current lease holder was rejected: "
                                 << outcome.error().to_string();
+      if (acking) acked_by_[held.id] = held.token;
       pool.erase(pool.begin() + static_cast<long>(index));
-      stale_.push_back(held);  // from now on this token must never work again
+      stale_.push_back(held);  // from now on this token can change nothing any more
+    } else if (repeats_its_own_ack) {
+      ASSERT_TRUE(outcome.ok()) << "the ACK that completed job " << held.id << " was refused";
+      ASSERT_EQ(sink_.entries().size(), records_before) << "a repeated ACK must not log anything";
+      ++repeated_acks_;
     } else {
       ASSERT_FALSE(outcome.ok()) << "a stale token was accepted for job " << held.id;
       const ErrorCode code = outcome.error().code();
@@ -257,24 +270,32 @@ class ModelRun {
   State state_;
   Engine engine_;
 
-  std::vector<Held> held_;   // leases the model believes may be current
-  std::vector<Held> stale_;  // tokens that must never work again
+  std::vector<Held> held_;                // leases the model believes may be current
+  std::vector<Held> stale_;               // tokens that can change nothing any more
+  std::map<JobId, LeaseToken> acked_by_;  // the token whose ACK completed each job
   std::map<std::string, KeyModel> keys_;
   LeaseToken highest_token_ = 0;
+  size_t repeated_acks_ = 0;
+
+ public:
+  size_t repeated_acks() const { return repeated_acks_; }
 };
 
 TEST(StateModelTest, RandomTrafficKeepsInvariantsAndReplaysExactly) {
   set_log_level(LogLevel::kError);  // every simulated clock step logs a warning
   size_t records = 0;
+  size_t repeated_acks = 0;
   for (uint64_t seed = 1; seed <= 12; ++seed) {
     SCOPED_TRACE("seed " + std::to_string(seed));
     ModelRun run(seed);
     run.run(2'500);
     if (::testing::Test::HasFatalFailure()) return;
     records += run.records_logged();
+    repeated_acks += run.repeated_acks();
   }
   // Sanity: the run really exercised the machine.
   EXPECT_GT(records, 12U * 1'000);
+  EXPECT_GT(repeated_acks, 20U) << "the idempotent-ACK path was hardly exercised";
   set_log_level(LogLevel::kInfo);
 }
 

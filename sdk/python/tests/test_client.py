@@ -233,7 +233,27 @@ def test_ack_whose_reply_was_lost_still_counts(proxy, client):
     with baton.Client(port=proxy.port) as flaky:
         job = flaky.reserve("q")
         proxy.drop = 1
-        flaky.ack(job.id, job.token)  # resent, answered STALE, resolved through STATUS
+        flaky.ack(job.id, job.token)  # resent; the token that completed the job gets OK again
+    assert client.status(job_id).state == "succeeded"
+
+
+def test_a_resent_ack_never_claims_another_workers_success(proxy, client):
+    """Found by the chaos harness. The SDK used to resolve a resent ACK that
+    answered STALE by asking STATUS, and took `succeeded` to mean "my ACK counted".
+    When a zombie did that for a job that someone else had completed, two workers
+    believed they had acknowledged it. The server now answers a repeated ACK
+    exactly, so there is nothing left to infer."""
+    job_id = client.enqueue("q", "x", backoff_ms=(1, 1))
+    with baton.Client(port=proxy.port) as zombie:
+        stale = zombie.reserve("q", lease_ms=300)
+        fresh = client.reserve("q", timeout_ms=10_000)  # after the zombie's lease expired
+        assert (fresh.id, fresh.attempt) == (job_id, 2)
+        client.ack(fresh.id, fresh.token)
+
+        proxy.drop = 1  # the zombie's ACK is sent twice, like any ACK whose reply is lost
+        with pytest.raises(baton.StaleLease):
+            zombie.ack(stale.id, stale.token)
+    client.ack(fresh.id, fresh.token)  # while the ACK that did count can be repeated
     assert client.status(job_id).state == "succeeded"
 
 

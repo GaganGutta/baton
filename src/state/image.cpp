@@ -193,7 +193,7 @@ Status StateBuilder::add_jobs(std::string_view piece) {
       return corrupt("job timestamp out of range");
     }
     if (job.lease_token >= state_->next_token_) return corrupt("bad lease token");
-    if ((job.state == JobState::kLeased) != (job.lease_token != 0)) {
+    if (holds_token(job.state) != (job.lease_token != 0)) {
       return corrupt("lease token does not match job state");
     }
     if (job.attempts > job.max_attempts) return corrupt("job has more attempts than allowed");

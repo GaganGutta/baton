@@ -204,6 +204,14 @@ Result<WallTime> Engine::heartbeat(JobId id, LeaseToken token, DurationMs lease_
 }
 
 Status Engine::ack(JobId id, LeaseToken token) {
+  // ACK is idempotent for the one token that completed the job. A client whose
+  // connection died between sending the ACK and reading the reply repeats it,
+  // and learns exactly whether it counted: OK if it did, STALE if the job was
+  // completed (or is held) under any other token. Nothing new is logged.
+  if (const Job* done = state_.find_job(id);
+      done != nullptr && done->state == JobState::kSucceeded && done->lease_token == token) {
+    return {};
+  }
   BATON_ASSIGN_OR_RETURN(const Job* job, find_leased(id, token));
   log_and_apply(JobSucceeded{.id = job->id, .token = token, .at = state_.wall_now()});
   return {};
