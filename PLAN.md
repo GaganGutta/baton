@@ -84,18 +84,18 @@ Conventions used below:
 - [x] Tests: parser unit tests; handler tests against an in-process server with a **controllable log** proving the reply-after-durable invariant (hold the fsync → no reply bytes; release → replies, in pipeline order); limits return clear errors; AUTH; blocking RESERVE semantics (timeout, multi-queue order, waiter fairness, disconnect while blocked).
 - [x] Integration tests (pytest): redis-cli and redis-py against the real binary; kill -9 + restart keeps acknowledged jobs.
 - [x] RESP3 negotiation (`HELLO 3`): not planned, but required — redis-py 8 defaults to it and treats a refusal as fatal (found by the integration tests).
-- [ ] Update docs; CI green; push.
+- [x] Update docs; CI green; push.
 
 ### M4. Leases, retries, delayed jobs, DLQ
-- [ ] Design section: lease lifecycle, token rules, expiry as a logged record, retry/backoff, DLQ, **restart policy for live leases** (leases survive; expiry timers get a restart grace so workers that could not heartbeat during downtime are not punished), clock-jump handling (= re-anchor path).
-- [ ] Lease expiry timer → `LeaseExpired` record (counts as a failed attempt; backoff or dead).
-- [ ] HEARTBEAT reschedules the expiry timer; stale token → `STALE`.
-- [ ] FAIL → retry with backoff or dead; client-supplied `RETRY_IN`/`NORETRY`.
-- [ ] Delayed jobs (`DELAY`/`AT`), promotion scheduled→ready by the wheel.
-- [ ] DLQ.LIST (paged), DLQ.RETRY (one / all), DLQ.PURGE.
-- [ ] Recovery: rebuild timers from persisted wall-clock deadlines; jump detector shares the path.
-- [ ] Tests with a fake clock: zombie worker ACK rejected after re-lease; heartbeat keeps a lease alive; expiry → retry → dead; backoff bounds (jitter within `[0, min(cap, base·2^n)]`); restart with live leases (worker ACK after restart accepted; expired-during-downtime handled with grace); clock jump forward/backward.
-- [ ] Integration tests for the same through the wire.
+- [x] Design section: lease lifecycle, token rules, expiry as a logged record, retry/backoff, DLQ, **restart policy for live leases** (leases survive; expiry timers get a restart grace so workers that could not heartbeat during downtime are not punished), clock-jump handling (= re-anchor path).
+- [x] Lease expiry timer → `LeaseExpired` record (counts as a failed attempt; backoff or dead).
+- [x] HEARTBEAT reschedules the expiry timer; stale token → `STALE`.
+- [x] FAIL → retry with backoff or dead; client-supplied `RETRY_IN`/`NORETRY`.
+- [x] Delayed jobs (`DELAY`/`AT`), promotion scheduled→ready by the wheel.
+- [x] DLQ.LIST (paged), DLQ.RETRY (one / all), DLQ.PURGE.
+- [x] Recovery: rebuild timers from persisted wall-clock deadlines; jump detector shares the path.
+- [x] Tests with a fake clock: zombie worker ACK rejected after re-lease; heartbeat keeps a lease alive; expiry → retry → dead; backoff bounds (jitter within `[0, min(cap, base·2^n)]`); restart with live leases (worker ACK after restart accepted; expired-during-downtime handled with grace); clock jump forward/backward.
+- [x] Integration tests for the same through the wire.
 - [ ] Update docs; CI green; push.
 
 ### M5. Snapshots and compaction

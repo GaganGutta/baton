@@ -33,6 +33,10 @@ mutants=(
   "replies sent before their records are durable|src/server/server.cpp|s,  if (c.marks.empty() && lsn <= committed_lsn_) {,  if (true) {,|tests/unit/server_test"
   "parked RESERVEs served newest first|src/server/server.cpp|s,      Connection\* c = find(it->second.front());,      Connection* c = find(it->second.back());,|tests/unit/server_test"
   "commands allowed without AUTH|src/server/server.cpp|s,    } else if (command->needs_auth && !c.authenticated) {,    } else if (false) {,|tests/unit/server_test"
+  "restart expires leases without a grace period|src/server/server.cpp|s,  state_->end_replay(config_.engine.lease_grace_ms);,  state_->end_replay(0);,|tests/unit/server_test"
+  "wall-clock jumps go unnoticed|src/state/engine.cpp|s,  if (std::abs(change) <= options_.clock_jump_threshold_ms) return;,  if (true) return;,|tests/unit/state_test"
+  "clock jump expires leases without a grace period|src/state/engine.cpp|s,  state_.rebuild_derived(options_.lease_grace_ms);,  state_.rebuild_derived(0);,|tests/unit/state_test"
+  "DLQ retry keeps the spent attempts|src/state/state.cpp|s,  job->attempts = 0;,  // mutant,|tests/unit/state_test"
 )
 
 rsync -a --exclude build --exclude .git ./ "$work/src/"

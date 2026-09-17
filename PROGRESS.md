@@ -6,9 +6,9 @@ from here with no other context. Read `PLAN.md` for the task breakdown and
 
 ## Status
 
-- **Current milestone:** M4 (leases, retries, delayed jobs, DLQ) — next
-- **Last completed task:** M3 networking: poller, RESP parser, server (reply gating, blocking RESERVE, limits, AUTH), integration tests with redis-cli/redis-py incl. kill -9, RESP3 negotiation
-- **Next task:** M4 design section, then DLQ.LIST / DLQ.RETRY / DLQ.PURGE, the wall-clock jump detector, restart lease grace tests through the wire
+- **Current milestone:** M5 (snapshots and compaction) — next
+- **Last completed task:** M4: DLQ.LIST/RETRY/PURGE, wall-clock jump detector (re-anchors timers through the restart path), restart lease grace tested through the wire and across SIGKILL, at-least-once rationale in design.md 7.1
+- **Next task:** M5 design section (fork vs copy-then-write vs incremental), then snapshot writer/reader, compaction, pause-time and recovery-time measurements
 
 ## Milestones
 
@@ -18,7 +18,7 @@ from here with no other context. Read `PLAN.md` for the task breakdown and
 | M1 Durable log | **done** | 140 tests under ASan+UBSan and TSan; 6/6 mutants killed; 2 fuzz targets; guarantees D1–D9 |
 | M2 State machine | **done** | 210 tests; model-based test with replay equivalence; 13/13 mutants killed; 5 fuzz targets; guarantees L1–L10. Layers: `Engine` (commands, only reader of clock/RNG) → `State::apply(record)` → `RecordSink` |
 | M3 Networking | **done** | 262 unit tests + 50 integration tests (real binary, redis-cli, redis-py under default/RESP2/RESP3, SIGKILL mid-pipeline); 16/16 mutants killed; 6 fuzz targets; guarantees W1–W11 |
-| M4 Leases/retries/DLQ | not started | |
+| M4 Leases/retries/DLQ | **done** | 279 unit + 54 integration tests; 20/20 mutants killed; guarantees L11–L13. Decisions: leases survive restarts with `--lease-grace` (5 s); a wall-clock step > 1 s is handled exactly like a restart |
 | M5 Snapshots | not started | |
 | M6 Python SDK | not started | |
 | M7 Chaos harness | not started | |

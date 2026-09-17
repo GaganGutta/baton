@@ -91,8 +91,15 @@ suite to fail each time:
 | ready order ignores priority | L6 |
 | idempotency window never expires | L7 |
 | idempotency key not recorded | L7 |
+| replies sent before their records are durable | W1 |
+| parked RESERVEs served newest first | W5 |
+| commands allowed without AUTH | W8 |
+| restart expires leases without a grace period | L11 |
+| wall-clock jumps go unnoticed | L12 |
+| clock jump expires leases without a grace period | L12 |
+| DLQ retry keeps the spent attempts | L13 |
 
-Last run: 2026-09-17, all 13 killed.
+Last run: 2026-09-17, all 20 killed.
 
 The check earns its keep: on its first run against the state machine, "idempotency
 window never expires" **survived**. The expiry comparison in `ENQUEUE` was
