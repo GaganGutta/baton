@@ -70,6 +70,27 @@ class PosixWritableFile final : public WritableFile {
   uint64_t size_;
 };
 
+class PosixReadableFile final : public ReadableFile {
+ public:
+  PosixReadableFile(std::string path, Fd fd) : path_(std::move(path)), fd_(std::move(fd)) {}
+
+  Result<size_t> read(size_t max, std::string& out) override {
+    const size_t old_size = out.size();
+    out.resize(old_size + max);
+    for (;;) {
+      const ssize_t n = ::read(fd_.get(), out.data() + old_size, max);
+      if (n < 0 && errno == EINTR) continue;
+      out.resize(old_size + (n > 0 ? static_cast<size_t>(n) : 0));
+      if (n < 0) return io_error(std::format("read {}", path_), errno);
+      return static_cast<size_t>(n);
+    }
+  }
+
+ private:
+  std::string path_;
+  Fd fd_;
+};
+
 // flock() is released by the kernel when the descriptor closes, including when
 // the process dies, so a crashed server never leaves a stale lock behind.
 class PosixDirLock final : public DirLock {
@@ -146,6 +167,12 @@ Result<std::string> PosixFs::read_file(const std::string& path) {
   }
   data.resize(got);
   return data;
+}
+
+Result<std::unique_ptr<ReadableFile>> PosixFs::open_read(const std::string& path) {
+  Fd fd(::open(path.c_str(), O_RDONLY | O_CLOEXEC));
+  if (!fd.valid()) return io_error(std::format("open {}", path), errno);
+  return std::unique_ptr<ReadableFile>(std::make_unique<PosixReadableFile>(path, std::move(fd)));
 }
 
 Result<uint64_t> PosixFs::file_size(const std::string& path) {

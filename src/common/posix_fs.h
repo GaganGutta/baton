@@ -12,6 +12,7 @@ class PosixFs final : public FileSystem {
   Result<std::unique_ptr<WritableFile>> open_append(const std::string& path,
                                                     OpenMode mode) override;
   Result<std::string> read_file(const std::string& path) override;
+  Result<std::unique_ptr<ReadableFile>> open_read(const std::string& path) override;
   Result<uint64_t> file_size(const std::string& path) override;
   Status truncate(const std::string& path, uint64_t size) override;
   Status rename(const std::string& from, const std::string& to) override;

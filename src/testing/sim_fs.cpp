@@ -12,10 +12,11 @@ namespace baton {
 // like a POSIX file descriptor does.
 class SimFs::Handle final : public WritableFile {
  public:
-  Handle(SimFs& fs, std::shared_ptr<SimFile> file) : fs_(fs), file_(std::move(file)) {}
+  Handle(SimFs& fs, std::shared_ptr<SimFile> file, std::string name)
+      : fs_(fs), file_(std::move(file)), name_(std::move(name)) {}
 
   Status append(std::string_view data) override { return fs_.handle_append(*file_, data); }
-  Status sync() override { return fs_.handle_sync(*file_); }
+  Status sync() override { return fs_.handle_sync(*file_, name_); }
   uint64_t size() const override {
     const std::scoped_lock lock(fs_.mutex_);
     return file_->data.size();
@@ -24,6 +25,7 @@ class SimFs::Handle final : public WritableFile {
  private:
   SimFs& fs_;
   std::shared_ptr<SimFile> file_;
+  std::string name_;  // as opened; a later rename does not change it
 };
 
 std::pair<std::string, std::string> SimFs::split(const std::string& path) {
@@ -91,13 +93,15 @@ Result<std::unique_ptr<WritableFile>> SimFs::open_append(const std::string& path
     }
     auto file = std::make_shared<SimFile>();
     d->second.current.emplace(name, file);
+    d->second.pending.push_back(
+        DirOp{.kind = DirOp::Kind::kLink, .name = name, .new_name = {}, .file = file});
     count_op_locked();
-    return std::unique_ptr<WritableFile>(std::make_unique<Handle>(*this, std::move(file)));
+    return std::unique_ptr<WritableFile>(std::make_unique<Handle>(*this, std::move(file), name));
   }
   if (existing == d->second.current.end()) {
     return Error{ErrorCode::kIo, std::format("open {}: No such file or directory", path)};
   }
-  return std::unique_ptr<WritableFile>(std::make_unique<Handle>(*this, existing->second));
+  return std::unique_ptr<WritableFile>(std::make_unique<Handle>(*this, existing->second, name));
 }
 
 Result<std::string> SimFs::read_file(const std::string& path) {
@@ -105,6 +109,31 @@ Result<std::string> SimFs::read_file(const std::string& path) {
   const auto file = find_locked(path);
   if (!file) return Error{ErrorCode::kIo, std::format("open {}: No such file or directory", path)};
   return file->data;
+}
+
+// Reads see the file as it was when it was opened, like a descriptor on a file
+// that is later replaced by rename.
+class SimFs::Reader final : public ReadableFile {
+ public:
+  explicit Reader(std::string data) : data_(std::move(data)) {}
+
+  Result<size_t> read(size_t max, std::string& out) override {
+    const size_t n = std::min(max, data_.size() - offset_);
+    out.append(data_, offset_, n);
+    offset_ += n;
+    return n;
+  }
+
+ private:
+  std::string data_;
+  size_t offset_ = 0;
+};
+
+Result<std::unique_ptr<ReadableFile>> SimFs::open_read(const std::string& path) {
+  const std::scoped_lock lock(mutex_);
+  const auto file = find_locked(path);
+  if (!file) return Error{ErrorCode::kIo, std::format("open {}: No such file or directory", path)};
+  return std::unique_ptr<ReadableFile>(std::make_unique<Reader>(file->data));
 }
 
 Result<uint64_t> SimFs::file_size(const std::string& path) {
@@ -139,7 +168,11 @@ Status SimFs::rename(const std::string& from, const std::string& to) {
   }
   std::shared_ptr<SimFile> file = f->second;
   d->second.current.erase(f);
-  d->second.current[to_name] = std::move(file);
+  d->second.current[to_name] = file;
+  d->second.pending.push_back(DirOp{.kind = DirOp::Kind::kRename,
+                                    .name = from_name,
+                                    .new_name = to_name,
+                                    .file = std::move(file)});
   count_op_locked();
   return {};
 }
@@ -151,6 +184,8 @@ Status SimFs::remove(const std::string& path) {
   if (d == dirs_.end() || d->second.current.erase(name) == 0) {
     return Error{ErrorCode::kIo, std::format("unlink {}: No such file or directory", path)};
   }
+  d->second.pending.push_back(
+      DirOp{.kind = DirOp::Kind::kUnlink, .name = name, .new_name = {}, .file = nullptr});
   count_op_locked();
   return {};
 }
@@ -161,6 +196,7 @@ Status SimFs::sync_dir(const std::string& dir) {
   if (d == dirs_.end())
     return Error{ErrorCode::kIo, std::format("fsync dir {}: no such directory", dir)};
   d->second.durable = d->second.current;
+  d->second.pending.clear();
   count_op_locked();
   return {};
 }
@@ -187,9 +223,9 @@ Status SimFs::handle_append(SimFile& file, std::string_view data) {
   return {};
 }
 
-Status SimFs::handle_sync(SimFile& file) {
+Status SimFs::handle_sync(SimFile& file, const std::string& name) {
   std::unique_lock lock(mutex_);
-  sync_gate_.wait(lock, [this] { return !syncs_held_; });
+  sync_gate_.wait(lock, [&] { return !syncs_held_ || !name.starts_with(held_prefix_); });
   if (sync_failure_countdown_ && --*sync_failure_countdown_ == 0) {
     sync_failure_countdown_.reset();
     sync_broken_ = true;
@@ -203,9 +239,10 @@ Status SimFs::handle_sync(SimFile& file) {
   return {};
 }
 
-void SimFs::hold_syncs() {
+void SimFs::hold_syncs(std::string_view name_prefix) {
   const std::scoped_lock lock(mutex_);
   syncs_held_ = true;
+  held_prefix_ = std::string(name_prefix);
 }
 
 void SimFs::release_syncs() {
@@ -254,9 +291,18 @@ std::unique_ptr<SimFs> SimFs::build_image_locked(CrashMode mode, uint64_t seed) 
   auto image = std::make_unique<SimFs>();
 
   for (const auto& [dir_name, dir] : dirs_) {
-    bool keep_dir_changes = mode == CrashMode::kKeepUnsynced;
-    if (mode == CrashMode::kTorn) keep_dir_changes = (rng() & 1U) != 0;
-    const Entries& surviving = keep_dir_changes ? dir.current : dir.durable;
+    // Which directory entries survive. POSIX promises nothing about unsynced
+    // creates, renames and removes, not even their order, so a torn crash keeps
+    // an arbitrary subset of them (each applied atomically, in order).
+    Entries surviving = mode == CrashMode::kKeepUnsynced ? dir.current : dir.durable;
+    if (mode == CrashMode::kTorn) {
+      for (const DirOp& op : dir.pending) {
+        if ((rng() & 1U) == 0) continue;
+        if (op.kind != DirOp::Kind::kLink) surviving.erase(op.name);
+        if (op.kind == DirOp::Kind::kLink) surviving[op.name] = op.file;
+        if (op.kind == DirOp::Kind::kRename) surviving[op.new_name] = op.file;
+      }
+    }
 
     SimDir& out_dir = image->dirs_[dir_name];
     for (const auto& [name, file] : surviving) {

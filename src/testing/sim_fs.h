@@ -6,7 +6,7 @@
 //
 //   1. Appended bytes are volatile until the file is sync()ed.
 //   2. Directory changes (create, rename, remove) are volatile until the
-//      directory is sync_dir()ed — even if the file's contents were synced.
+//      directory is sync_dir()ed â€” even if the file's contents were synced.
 //
 // crash_image() returns the file system as it could look after a crash.
 // capture_crash_image_after() takes that image in the middle of a run, after
@@ -40,8 +40,8 @@ enum class CrashMode : uint8_t {
   // The process died but the OS kept running: everything written survives.
   kKeepUnsynced,
   // Power loss mid-writeback: each file keeps a random prefix of its unsynced
-  // tail, the end of which may be garbage; each directory's unsynced changes
-  // either all made it or none did.
+  // tail, the end of which may be garbage; of each directory's unsynced changes
+  // (create, rename, remove) an arbitrary subset made it.
   kTorn,
 };
 
@@ -55,6 +55,7 @@ class SimFs final : public FileSystem {
   Result<std::unique_ptr<WritableFile>> open_append(const std::string& path,
                                                     OpenMode mode) override;
   Result<std::string> read_file(const std::string& path) override;
+  Result<std::unique_ptr<ReadableFile>> open_read(const std::string& path) override;
   Result<uint64_t> file_size(const std::string& path) override;
   Status truncate(const std::string& path, uint64_t size) override;
   Status rename(const std::string& from, const std::string& to) override;
@@ -66,7 +67,9 @@ class SimFs final : public FileSystem {
   // --- a disk that stalls -----------------------------------------------------
   // While syncs are held, every sync() blocks. Lets a test freeze the moment
   // between "written" and "durable" and look at what the system does meanwhile.
-  void hold_syncs();
+  // With a prefix, only files whose name (as opened) starts with it stall: a
+  // test can stall the log and leave snapshot files alone.
+  void hold_syncs(std::string_view name_prefix = {});
   void release_syncs();
 
   // --- crash simulation -----------------------------------------------------
@@ -107,11 +110,21 @@ class SimFs final : public FileSystem {
     size_t synced = 0;  // data[0, synced) is durable
   };
   using Entries = std::map<std::string, std::shared_ptr<SimFile>>;
+  // A directory change that has not been made durable by sync_dir() yet.
+  struct DirOp {
+    enum class Kind : uint8_t { kLink, kUnlink, kRename };
+    Kind kind = Kind::kLink;
+    std::string name;
+    std::string new_name;           // kRename
+    std::shared_ptr<SimFile> file;  // kLink, kRename
+  };
   struct SimDir {
     Entries current;
     Entries durable;
+    std::vector<DirOp> pending;  // in the order they happened
   };
   class Handle;
+  class Reader;
 
   static std::pair<std::string, std::string> split(const std::string& path);
   std::shared_ptr<SimFile> find_locked(const std::string& path) const;
@@ -120,7 +133,7 @@ class SimFs final : public FileSystem {
   void count_op_locked();
 
   Status handle_append(SimFile& file, std::string_view data);
-  Status handle_sync(SimFile& file);
+  Status handle_sync(SimFile& file, const std::string& name);
 
   mutable std::mutex mutex_;
   std::map<std::string, SimDir> dirs_;
@@ -143,6 +156,7 @@ class SimFs final : public FileSystem {
   class Lock;
   std::set<std::string> locked_dirs_;
   bool syncs_held_ = false;
+  std::string held_prefix_;
   std::condition_variable sync_gate_;
 };
 

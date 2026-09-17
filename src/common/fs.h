@@ -36,6 +36,19 @@ class WritableFile {
   virtual uint64_t size() const = 0;
 };
 
+// Sequential reads of a file that may be much larger than memory should hold at
+// once (snapshots).
+class ReadableFile {
+ public:
+  ReadableFile() = default;
+  ReadableFile(const ReadableFile&) = delete;
+  ReadableFile& operator=(const ReadableFile&) = delete;
+  virtual ~ReadableFile() = default;
+
+  // Appends up to `max` bytes to `out`. Returns how many; 0 means end of file.
+  virtual Result<size_t> read(size_t max, std::string& out) = 0;
+};
+
 // Held for as long as a process owns a data directory; released on destruction.
 class DirLock {
  public:
@@ -66,6 +79,7 @@ class FileSystem {
                                                             OpenMode mode) = 0;
 
   virtual Result<std::string> read_file(const std::string& path) = 0;
+  virtual Result<std::unique_ptr<ReadableFile>> open_read(const std::string& path) = 0;
   virtual Result<uint64_t> file_size(const std::string& path) = 0;
 
   // Shrinks the file to `size` bytes and makes the new length durable.
