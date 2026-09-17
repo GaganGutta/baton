@@ -12,6 +12,7 @@ Contents:
 2. [Architecture in one page](#2-architecture-in-one-page)
 3. [M0 — Foundations](#3-m0--foundations)
 4. [M1 — The durable log](#4-m1--the-durable-log)
+5. [M2 — The state machine](#5-m2--the-state-machine)
 
 ---
 
@@ -437,6 +438,213 @@ target for the segment reader.
 - **The `interval` fsync timer runs on the real steady clock**, not the
   injectable `Clock`: it lives entirely inside the log thread and nothing
   observable depends on its exact timing.
+
+## 5. M2 — The state machine
+
+Everything between the wire protocol and the log: what a job is, which facts
+get logged, how those facts change state, and the data structures that make it
+fast. No networking and no threads — this layer is a deterministic,
+single-threaded library, which is what makes it testable to exhaustion.
+
+### 5.1 Layers
+
+```
+Engine   command logic: validate → resolve nondeterminism → record → log → apply
+  │      (the only code that reads the clock or the RNG)
+  ▼
+State    jobs, queues, idempotency index, timers; mutated ONLY by apply(record)
+  │
+  ▼
+RecordSink   "append this record, give me its LSN" (the LogWriter in production,
+             a vector in tests)
+```
+
+`Engine` exposes one typed method per command (`enqueue`, `reserve`,
+`heartbeat`, `ack`, `fail`, `cancel`, `status`, …). The network layer (M3) only
+translates RESP to these calls and gates replies on the LSN they return.
+
+### 5.2 Jobs
+
+| Field | Notes |
+|---|---|
+| `id` | u64, server-generated, strictly increasing from 1 |
+| `queue` | name, `[A-Za-z0-9._:-]{1,128}`; queues are created on first use |
+| `payload` | opaque bytes, size-limited (M3); immutable and reference-counted so a snapshot can share it instead of copying it (M5) |
+| `priority` | i32, higher first, default 0 |
+| `run_at` | wall-clock ms; the job is not handed out before this |
+| `attempts` / `max_attempts` | attempts = leases granted so far |
+| `backoff_base_ms` / `backoff_cap_ms` | per job, defaults 1 s / 5 min |
+| `state` | `scheduled`, `ready`, `leased`, `succeeded`, `dead`, `cancelled` |
+| `lease_token`, `lease_expires_at` | valid while `leased` |
+| `last_error`, `created_at`, `finished_at` | for `STATUS` and the DLQ |
+| `idem_key` | optional, see 5.5 |
+
+```
+             ENQUEUE                    RESERVE                 ACK
+ (run_at > now) ──► scheduled ──due──► ready ─────► leased ─────────► succeeded
+ (run_at <= now) ──────────────────────▲              │
+                                       │              │ FAIL / lease expired
+                        backoff elapsed│              ▼
+                                  scheduled ◄── attempts < max ──┤
+                                                                 └─ attempts == max ──► dead
+ CANCEL: scheduled | ready | leased ──► cancelled        DLQ.RETRY: dead ──► ready
+```
+
+`scheduled` vs `ready` is *derived* from `run_at` and the clock, not logged:
+promotion is an index move, and replay re-derives it. Everything else is a
+logged fact.
+
+**Ready order** within a queue is `(priority desc, run_at asc, id asc)`: FIFO by
+the time a job became runnable, so a retried job queues behind work that was
+already waiting, and ties break deterministically.
+
+### 5.3 Records: the vocabulary of facts
+
+Handlers resolve every nondeterministic input *before* logging, so a record is
+a complete fact and `apply` is a pure function of `(state, record)`:
+
+| Type | Record | Resolved by the handler |
+|---|---|---|
+| 1 | `JobEnqueued {id, queue, payload, priority, run_at, max_attempts, backoff, idem_key, idem_expires_at, at}` | id, `at` (clock), `run_at` from `DELAY` |
+| 2 | `JobLeased {id, token, lease_expires_at, at}` | token, clock |
+| 3 | `LeaseExtended {id, token, lease_expires_at, at}` | clock |
+| 4 | `JobSucceeded {id, token, at}` | clock |
+| 5 | `AttemptFailed {id, token, reason, error, at, outcome: retry(run_at) \| dead}` | clock, **backoff jitter (RNG)**, the retry-or-dead decision |
+| 6 | `JobCancelled {id, at}` | clock |
+| 7 | `DeadJobRetried {id, run_at, at}` | clock |
+| 8 | `JobsPurged {ids}` | — |
+
+`AttemptFailed` covers both a worker's `FAIL` and a lease expiry
+(`reason = lease_expired`): a lease expiring is a state change — it can consume
+the last attempt and send the job to the dead-letter queue — so it must be a
+logged fact, not something recovery guesses from timestamps.
+
+Payloads are encoded with varints and length-prefixed byte strings
+(`common/codec.h`). Each payload starts with a version byte so fields can be
+added later. Decoding is strict: trailing bytes, unknown enum values or
+truncated fields fail recovery with a corruption error rather than being
+skipped.
+
+`apply` has preconditions (the job exists, is in the right state, the token
+matches). Live, the handler has already verified them. During replay a violated
+precondition means the log and the code disagree, and `apply` returns an error
+that stops recovery: better to refuse than to guess.
+
+### 5.4 Leases and fencing
+
+`RESERVE` pops the best ready job, takes the next value of a **server-wide
+token counter**, and logs `JobLeased`. `HEARTBEAT`, `ACK` and `FAIL` must
+present the token. After a lease expires and the job is leased again, the old
+worker's token no longer matches and its `ACK` is rejected with `STALE` — a
+zombie cannot complete a job someone else now owns.
+
+The counter is server-wide rather than per job for two reasons: tokens stay
+unique even after `DLQ.RETRY` resets a job's attempts, and a globally
+increasing token is what a downstream resource needs if it wants to fence
+writes itself ("reject any write carrying a token lower than one I have seen").
+
+**A lease is valid until an `AttemptFailed{lease_expired}` record says
+otherwise** — validity is state, not a clock comparison. An `ACK` that arrives
+after the nominal expiry but before the expiry was processed is accepted:
+nobody else has been given the job, so accepting it is both safe and the most
+useful answer. This also removes a whole class of clock-skew arguments.
+
+### 5.5 Idempotent enqueue
+
+`ENQUEUE … KEY k` looks `k` up in the idempotency index. If an entry exists and
+`expires_at > now`, the existing job id is returned and nothing is logged.
+Otherwise a `JobEnqueued` carrying the key and its expiry is logged, and
+`apply` (over)writes the index entry. The decision uses the clock, so it is
+made in the handler; `apply` just records the outcome.
+
+### 5.6 Invisible garbage collection
+
+Two things disappear purely because time passes: idempotency keys (after their
+window) and finished jobs (after the retention period: succeeded/cancelled
+default 10 minutes, dead 7 days). Neither is logged. The rule that keeps this
+sound:
+
+> Visibility is defined by timestamps, and physical removal is invisible. A
+> handler treats an expired key as absent whether or not it has been removed
+> yet; `apply` never consults the clock. Replay applies records without
+> collecting anything, then collects once at the end using the current time.
+
+Live and replayed states can therefore differ physically (what lingers) but
+never in anything a client can observe.
+
+### 5.7 Timers: a hierarchical timing wheel
+
+Delayed jobs, retry backoff, lease expiry, key expiry and retention all need
+"call me at time T" for potentially millions of pending entries, with frequent
+cancellation (every `HEARTBEAT` moves a lease deadline). A binary heap costs
+O(log n) per operation and lazy deletion bloats it under heartbeat churn; a
+hashed hierarchical timing wheel (Varghese & Lauck, 1987) gives O(1) insert and
+cancel.
+
+- 6 levels × 64 slots, 1 ms resolution. Level *k* slots are 64^k ms wide, so the
+  wheel spans 64^6 ms ≈ 2.2 years; later deadlines are clamped and re-inserted
+  when they come up.
+- The level for a deadline is found from the highest bit in which it differs
+  from the current time; one 64-bit occupancy bitmap per level makes "when is
+  the next non-empty slot?" a few bit operations, so the event loop can sleep
+  exactly until the next deadline instead of ticking every millisecond.
+- Entries live in a slab (`std::vector`) and are linked by index, with a free
+  list: no allocation per timer, no raw pointers, and handles carry a generation
+  counter so a stale handle can never cancel someone else's timer.
+- When the clock reaches a higher-level slot, its entries cascade down a level.
+
+The wheel runs on **monotonic** milliseconds. Deadlines are stored in jobs as
+**wall-clock** times (they must survive restarts). The conversion happens at
+insertion: `mono_deadline = mono_now + max(0, wall_deadline − wall_now)`.
+Timers are derived state: replay does not touch the wheel, and after replay —
+or when a wall-clock jump is detected (M4) — all timers are rebuilt from the
+jobs. One rebuild path serves restart and clock jumps alike.
+
+### 5.8 Indexes and memory
+
+- **Job table:** `std::unordered_map<JobId, Job>`; node-based, so `Job*` is
+  stable for the heap and the timers. (Revisit with measurements in M8.)
+- **Ready queue per named queue:** an indexed binary heap of `Job*`. Each job
+  stores its heap position, so `CANCEL` of a ready job is O(log n) instead of a
+  scan or a tombstone.
+- **Dead set per queue:** ordered by job id for stable `DLQ.LIST` paging.
+- **Memory accounting:** `apply` maintains a running estimate (job struct, map
+  node, payload, strings, timer node, index entries). M3's `max memory` limit
+  compares against it; M8 compares it with RSS to see how honest it is.
+
+### 5.9 Test plan
+
+- Timing wheel against a naive reference model under randomized
+  insert/cancel/advance, including cascades, far-future clamping, stale handles
+  and `next_deadline` never being later than the true next expiry.
+- Indexed heap: ordering, arbitrary removal, randomized against `std::sort`.
+- Record encode/decode round trips; strict decoding rejects truncation at every
+  length, trailing bytes and unknown enum values; a fuzz target for the decoder.
+- One test per state transition and per rejected transition.
+- **Model-based test:** long random sequences of commands and clock advances.
+  After every step `State::check_invariants()` must pass (each job in exactly
+  the index its state implies, counters equal a recount, heap property, timer
+  present exactly when required, memory estimate equals a recomputation).
+- **Replay equivalence:** at random points, rebuild a fresh `State` by replaying
+  the records logged so far and compare canonical serializations. This is the
+  test that fails if `apply` ever reads a clock, an RNG, or anything not in the
+  record.
+- Serialization round trip: `deserialize(serialize(s))` is equivalent to `s`
+  (the basis of M5 snapshots).
+
+### 5.10 Alternatives considered
+
+- **Logging commands instead of facts** (log `FAIL job 7`, recompute the backoff
+  on replay). Smaller records, but replay then depends on RNG state, the clock
+  and configuration at replay time; any change to the backoff code would
+  silently rewrite history. Facts make old logs mean the same thing forever.
+- **Per-job attempt numbers as fencing tokens.** Simpler, but reused after
+  `DLQ.RETRY`.
+- **`std::set` for the ready queue.** Trivially correct, but a node allocation
+  per job and poor locality; the indexed heap stores one pointer per job.
+- **A binary heap for timers.** See 5.7: O(log n) and heartbeat churn.
+- **Logging GC.** Deterministic physical state, but one more record per job
+  for something no client can observe.
 
 ---
 
