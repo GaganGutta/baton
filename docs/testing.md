@@ -43,7 +43,14 @@ after three kinds of crash:
 |---|---|---|
 | `kKeepUnsynced` | process crash (SIGKILL, OOM) | everything written |
 | `kLoseUnsynced` | clean power loss | only synced bytes and synced directory entries |
-| `kTorn` | power loss mid-writeback | synced bytes, plus a random prefix of each unsynced tail whose end may be garbage; each directory's unsynced changes all survive or all vanish |
+| `kTorn` | power loss mid-writeback | synced bytes, plus a random prefix of each unsynced tail whose end may be garbage; of each directory's unsynced creates, renames and unlinks, a random subset (applied in their original order) |
+
+The directory half of `kTorn` was added in M5 and is deliberately harsher than
+ordered-mode ext4: an application that fsyncs a directory once after several
+unlinks has no promise about which of them a crash keeps. It immediately found
+a recovery bug (design doc, 8.4). What `SimFs` still assumes is what POSIX
+promises: `rename` is atomic, and `fsync` on a directory persists everything
+done to it before.
 
 A crash image can be captured after the *n*-th file-system operation while the
 code under test keeps running, together with what had been acknowledged at that
@@ -98,14 +105,26 @@ suite to fail each time:
 | wall-clock jumps go unnoticed | L12 |
 | clock jump expires leases without a grace period | L12 |
 | DLQ retry keeps the spent attempts | L13 |
+| snapshot renamed into place without fsync | S2 |
+| snapshot rename not made durable | S2 |
+| log compacted on the strength of the newest snapshot | S3 |
+| snapshot end-chunk totals not checked | S4 |
+| snapshot chunk sequence not checked | S4 |
+| snapshot started before the log is durable up to it | S6 |
+| leftover segments behind the snapshot are validated | S2 |
 
-Last run: 2026-09-17, all 20 killed.
+Last run: 2026-09-17, all 27 killed.
 
 The check earns its keep: on its first run against the state machine, "idempotency
 window never expires" **survived**. The expiry comparison in `ENQUEUE` was
 correct but untested, because garbage collection always removed expired keys
 before the handler could see them. The comparison only matters when collection
 lags (section 5.11 of the design doc), so a test for exactly that case was added.
+It happened again in M5: "snapshot end-chunk totals not checked" survived,
+because the only test with wrong totals also had a wrong chunk count, which a
+different check caught first. The totals exist to catch a chunk spliced in
+from another snapshot (valid checksum, valid sequence number), so that is now
+what `SnapshotDamageTest.ChunkSplicedInFromAnotherSnapshotIsRejected` does.
 
 ## Fuzz targets
 
@@ -113,10 +132,11 @@ lags (section 5.11 of the design doc), so a test for exactly that case was added
 |---|---|---|
 | `fuzz_log_segment` | arbitrary bytes as the newest log segment | no crash or sanitizer report; delivered LSNs are contiguous; a repair is idempotent |
 | `fuzz_log_damage` | a program of damage operations (bit flips, truncation, garbage, deleted segments) applied to a valid multi-segment log | recovery either refuses or delivers an intact prefix of the original records — never a damaged record, never one out of order |
-
+| `fuzz_resp_parser` | a chunk size and a byte stream from an untrusted client | no crash or over-read; buffering stays bounded (oversized arguments are skipped as they stream in); fed in chunks or all at once, the same requests or the same error come out |
 | `fuzz_record_decode` | a type byte and a record payload | decoding never crashes or over-allocates; whatever decodes re-encodes to a stable form |
 | `fuzz_state_apply` | a sequence of records, as recovery would read them from a checksummed but hostile log | `apply` accepts a record or rejects it *and changes nothing*; afterwards all invariants hold and the state survives a serialize/deserialize round trip |
 | `fuzz_state_deserialize` | arbitrary bytes as a serialized state (the body of a snapshot) | rejected, or loads into a state whose invariants hold and that re-serializes |
+| `fuzz_snapshot_load` | a snapshot file, either raw bytes or a list of chunks that the harness frames with valid checksums and sequence numbers | rejected, or every byte was read, the loaded state's invariants hold, and a snapshot written from it loads back to the identical state |
 
 `fuzz_log_damage` is structure-aware because raw-byte fuzzing cannot get past
 the record checksums. Its garbage comes from a PRNG seeded by the input rather

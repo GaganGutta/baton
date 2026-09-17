@@ -22,6 +22,17 @@ down here instead of being built, so the core stays small and provable.
 - **Per-job result retention policies** beyond a single server-wide setting.
 - **Rate limiting** per queue (tokens per second), beyond concurrency limits.
 - **Payload compression** in the log and snapshots.
+- **Incremental snapshot capture.** The event-loop pause of a snapshot is a
+  copy of every job's metadata, so it grows with the live set (measured in
+  `docs/benchmarks.md`). Copying a slice per loop iteration, with copy-on-write
+  for jobs touched meanwhile, would make it constant. Incremental snapshot
+  *files* (deltas) are a separate, larger idea (design doc, 8.1).
+- **More snapshot triggers**: time-based, at shutdown, and a retry soon after a
+  failed attempt; plus I/O throttling so a snapshot cannot hurt the log's fsync
+  latency on a shared disk.
+- **Retention during replay.** Recovery keeps every job of the replayed log tail
+  in memory until replay ends. Enforcing retention while replaying would bound
+  recovery memory even with snapshots turned off.
 
 Items get added here whenever a milestone surfaces something worth doing that
 is not worth doing now.

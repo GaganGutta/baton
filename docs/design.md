@@ -1162,7 +1162,11 @@ snapshot and joined by the loop when it reports back through the wake pipe.
 `bench/storage_bench` measures, on a real file system: the event-loop pause
 (`capture_image`) and the total snapshot time against the number of live jobs,
 and recovery time against log length with and without a snapshot. Results and
-the exact commands are in `docs/benchmarks.md`.
+the exact commands are in `docs/benchmarks.md`. In short, on the development
+laptop: the pause is 0.15 ms at 10,000 live jobs, 3.5 ms at 100,000 and 126 ms
+at a million; a snapshot makes recovery faster only once the log is longer
+than the live state (69 ms instead of 579 ms for a million-job history of
+which a tenth is still live), and no faster when everything is still live.
 
 ### 8.7 Test plan
 
@@ -1188,12 +1192,12 @@ directory has everything before the fsync.
 ### 8.8 Limitations
 
 - **The pause grows with the number of live jobs.** It is the time to copy
-  ~160 bytes per job; measured in `docs/benchmarks.md`. Fine for hundreds of
+  ~170 bytes per job; measured in `docs/benchmarks.md`. Fine for hundreds of
   thousands of jobs, a visible stall at a million. The fix is an incremental
   capture (copy a slice per loop iteration, with copy-on-write for jobs touched
   meanwhile); it is on the roadmap because it is exactly the kind of cleverness
   that needs its own test campaign.
-- **Memory while a snapshot is written**: the image (~160 bytes per job) plus
+- **Memory while a snapshot is written**: the image (~170 bytes per job) plus
   every payload that finishes during the write, which the image keeps alive
   until the write ends.
 - **A snapshot does not make recovery faster unless the log is longer than the

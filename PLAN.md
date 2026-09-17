@@ -99,15 +99,15 @@ Conventions used below:
 - [ ] Update docs; CI green; push.
 
 ### M5. Snapshots and compaction
-- [ ] Design section: evaluate fork COW (incl. multithreaded-fork hazards), copy-then-write, incremental/delta snapshots; pick one; file format; retention (keep 2); recovery order; interaction with log durability (snapshot at LSN X is finalized only after the log is durable through X).
-- [ ] Shared immutable payload blobs so the consistent copy is cheap (metadata copy + refcount bump, no payload memcpy).
-- [ ] `snapshot/writer`: temp file → fsync → rename → fsync dir → delete covered segments (governed by the older retained snapshot).
-- [ ] `snapshot/reader`: validate magic/version/section CRCs/footer; torn or corrupt newest snapshot → fall back to the older snapshot + log; otherwise refuse.
-- [ ] Triggers: log bytes since last snapshot, `SNAPSHOT` command. Startup cleans `*.tmp`.
-- [ ] Tests: snapshot+tail == full replay (canonical dump); crash at each step of the write protocol (fault-injecting FS); torn snapshot fallback; segments never deleted before the covering snapshot is durable; TSan on snapshot thread handoff.
-- [ ] Fuzz target: snapshot loader.
-- [ ] Measure: event-loop pause during snapshot vs. live-job count; recovery time vs. log size with/without snapshot (`bench/` scripts; results recorded in docs/benchmarks.md).
-- [ ] Update docs; CI green; push.
+- [x] Design section: evaluate fork COW (incl. multithreaded-fork hazards), copy-then-write, incremental/delta snapshots; pick one; file format; retention (keep 2); recovery order; interaction with log durability (snapshot at LSN X is finalized only after the log is durable through X).
+- [x] Shared immutable payload blobs so the consistent copy is cheap (metadata copy + refcount bump, no payload memcpy).
+- [x] `snapshot/writer`: temp file → fsync → rename → fsync dir → delete covered segments (governed by the older retained snapshot).
+- [x] `snapshot/reader`: validate magic/version/section CRCs/footer; torn or corrupt newest snapshot → fall back to the older snapshot + log; otherwise refuse.
+- [x] Triggers: log bytes since last snapshot, `SNAPSHOT` command. Startup cleans `*.tmp`.
+- [x] Tests: snapshot+tail == full replay (canonical dump); crash at each step of the write protocol (fault-injecting FS); torn snapshot fallback; segments never deleted before the covering snapshot is durable; TSan on snapshot thread handoff.
+- [x] Fuzz target: snapshot loader.
+- [x] Measure: event-loop pause during snapshot vs. live-job count; recovery time vs. log size with/without snapshot (`bench/` scripts; results recorded in docs/benchmarks.md).
+- [x] Update docs; CI green; push.
 
 ### M6. Python SDK
 - [ ] `sdk/python/pyproject.toml` (installable with `pip install "git+https://github.com/GaganGutta/baton#subdirectory=sdk/python"`), package `baton`.

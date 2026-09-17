@@ -32,6 +32,25 @@ Limits of these promises are listed in `docs/design.md` section 4.7; the one
 that matters most: damage confined to the very last record is indistinguishable
 from a torn write and is repaired by truncation.
 
+## Snapshots and compaction
+
+Snapshots must never weaken D1–D9: they are an optimization of recovery, and
+the oracle in every test below is "the state that replaying the complete log
+gives".
+
+| # | Promise | Checked by |
+|---|---|---|
+| S1 | **Snapshot + log tail = full replay.** Recovering from a snapshot and the records after it gives exactly the state that replaying the whole log gives, wherever the snapshot was taken. | `StateRecoveryTest.SnapshotPlusTailEqualsFullReplay`, `.SnapshotAtTheVeryEndNeedsNoReplay`, `.CompactedLogRecoversFromTheSnapshots`; `StateModelTest` (snapshot at random points); through the wire: `ServerSnapshotTest.RestartRecoversFromTheSnapshotPlusTheLogAfterIt`; real binary, real file system, SIGKILL: `test_snapshots.py::test_snapshot_command_then_sigkill_recovers_from_the_snapshot` |
+| S2 | **A crash at any point of a snapshot cycle loses nothing.** A crash image taken after *every* file-system operation of three consecutive snapshot-and-compact cycles — with un-synced data lost, kept, or torn, and with an arbitrary subset of un-synced directory operations surviving — recovers to the same state. | `SnapshotCrashTest.EveryCrashPointRecoversTheSameState` (3 crash modes), `StateRecoveryTest.TornCrashesWithManySeeds`, `RecoveryTest.LeftoverSegmentsCoveredByTheSnapshotAreIgnored`; mutants "snapshot renamed into place without fsync", "snapshot rename not made durable", "leftover segments behind the snapshot are validated" |
+| S3 | **Log segments are deleted only when two durable snapshots make them dispensable**: never with a single snapshot, never the segment being written, never a segment that holds a record after the *older* retained snapshot. | `CompactionTest.*` (6 tests); mutant "log compacted on the strength of the newest snapshot" |
+| S4 | **An unreadable snapshot is never trusted and never fatal by itself.** Every truncation, every single-bit flip, trailing bytes, a cut at a chunk boundary, reordered, duplicated, missing or foreign chunks and a wrong file name are all rejected; recovery then falls back to the older snapshot, or to the whole log if it is still there. | `SnapshotDamageTest.*` (8 tests), `StateRecoveryTest.UnreadableNewestSnapshotFallsBackToTheOlderOne`, `.TruncatedNewestSnapshotFallsBackToo`, `.NoReadableSnapshotFallsBackToTheWholeLogIfItIsStillThere`, `test_snapshots.py::test_unreadable_newest_snapshot_falls_back_to_the_older_one`; `fuzz_snapshot_load`; mutants "snapshot end-chunk totals not checked", "snapshot chunk sequence not checked" |
+| S5 | **A snapshot never hides log damage and never invents state.** Damage in the log after the snapshot still refuses to start; if neither snapshot nor log can cover a gap, baton refuses rather than start with jobs missing. | `StateRecoveryTest.LogDamageIsNeverPaperedOverByASnapshot`, `.RefusesWhenNeitherSnapshotNorLogCanCoverTheGap` |
+| S6 | **A snapshot is never ahead of the durable log.** It is written only once every record it contains has been fsynced. | `ServerSnapshotTest.SnapshotIsNeverAheadOfTheDurableLog`; mutant "snapshot started before the log is durable up to it" |
+| S7 | **Snapshots do not stop the server.** Clients are served while a snapshot is being written, even if its fsync stalls; a failed snapshot is reported and changes nothing; automatic snapshots compact the log under load and a power failure afterwards loses nothing. | `ServerSnapshotTest.TrafficContinuesWhileASnapshotIsBeingWritten`, `ServerAutoSnapshotTest.LogIsCompactedInTheBackgroundAndNothingIsLost`, `StateRecoveryTest.SnapshotterReportsFailuresInsteadOfCrashing`, `SnapshotTest.FailedWriteLeavesNothingVisible`, `test_snapshots.py::test_the_log_is_compacted_while_serving_and_sigkill_loses_nothing`; TSan over the unit tests |
+
+Not promised: how long the event loop pauses to copy the state. That is
+measured, not guaranteed (`docs/benchmarks.md`, design doc 8.8).
+
 ## Delivery and leases
 
 These are promises of the state machine (M2), checked at the `Engine` API. M3

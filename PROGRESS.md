@@ -6,9 +6,9 @@ from here with no other context. Read `PLAN.md` for the task breakdown and
 
 ## Status
 
-- **Current milestone:** M5 (snapshots and compaction) — next
-- **Last completed task:** M4: DLQ.LIST/RETRY/PURGE, wall-clock jump detector (re-anchors timers through the restart path), restart lease grace tested through the wire and across SIGKILL, at-least-once rationale in design.md 7.1
-- **Next task:** M5 design section (fork vs copy-then-write vs incremental), then snapshot writer/reader, compaction, pause-time and recovery-time measurements
+- **Current milestone:** M6 (Python SDK) — next
+- **Last completed task:** M5: copy-then-write snapshots (chosen over fork COW and incremental, design.md 8.1), chunked snapshot files, two retained snapshots, compaction governed by the older one, `recover_state()`, background `Snapshotter`, `SNAPSHOT` command and `--snapshot-every`, `fuzz_snapshot_load`, 7 new mutants, `bench/storage_bench` with results in `docs/benchmarks.md`
+- **Next task:** M6 design section, then `sdk/python`: own RESP client, `Client`, `Worker` with task decorator, heartbeats, graceful SIGTERM, idempotency helper, pytest suite against the real binary, CI job
 
 ## Milestones
 
@@ -19,7 +19,7 @@ from here with no other context. Read `PLAN.md` for the task breakdown and
 | M2 State machine | **done** | 210 tests; model-based test with replay equivalence; 13/13 mutants killed; 5 fuzz targets; guarantees L1–L10. Layers: `Engine` (commands, only reader of clock/RNG) → `State::apply(record)` → `RecordSink` |
 | M3 Networking | **done** | 262 unit tests + 50 integration tests (real binary, redis-cli, redis-py under default/RESP2/RESP3, SIGKILL mid-pipeline); 16/16 mutants killed; 6 fuzz targets; guarantees W1–W11 |
 | M4 Leases/retries/DLQ | **done** | 279 unit + 54 integration tests; 20/20 mutants killed; guarantees L11–L13. Decisions: leases survive restarts with `--lease-grace` (5 s); a wall-clock step > 1 s is handled exactly like a restart |
-| M5 Snapshots | not started | |
+| M5 Snapshots | **done** | 325 unit + 57 integration tests; 27/27 mutants killed; 7 fuzz targets; guarantees S1–S7. SimFs torn crashes now keep an arbitrary subset of unsynced directory operations, which found a real recovery bug (leftover segments behind the snapshot, design.md 8.4). Measured: pause 0.15 ms / 3.5 ms / 126 ms at 10k / 100k / 1M live jobs |
 | M6 Python SDK | not started | |
 | M7 Chaos harness | not started | |
 | M8 Benchmarks + v0.1.0 | not started | |
@@ -55,7 +55,8 @@ from here with no other context. Read `PLAN.md` for the task breakdown and
 ```bash
 scripts/check.sh            # format, asan, tsan, tidy
 scripts/check.sh fuzz       # 30 s per fuzz target
-scripts/mutation-check.sh   # durability mutants must all be killed
+scripts/mutation-check.sh   # durability mutants must all be killed (optional name filter)
+bench/run_storage_bench.sh  # snapshot pause / write / load and recovery time (docs/benchmarks.md)
 ```
 
 ## Key decisions so far
