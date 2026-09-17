@@ -16,6 +16,7 @@ Contents:
 6. [M3 — Networking](#6-m3--networking)
 7. [M4 — Leases, retries, time and the dead-letter queue](#7-m4--leases-retries-time-and-the-dead-letter-queue)
 8. [M5 — Snapshots and log compaction](#8-m5--snapshots-and-log-compaction)
+9. [M6 — The Python SDK](#9-m6--the-python-sdk)
 
 ---
 
@@ -1218,6 +1219,194 @@ directory has everything before the fsync.
 - If both retained snapshots are unreadable *and* the log before them has been
   compacted away, the server refuses to start. There is no partial recovery,
   deliberately: baton would rather stop than silently forget jobs.
+
+## 9. M6 — The Python SDK
+
+The server's guarantees end at the socket. The SDK's job is to carry them the
+rest of the way — into a worker process that gets killed, loses its network or
+runs a handler for an hour — without promising anything the protocol cannot
+back. It lives in `sdk/python`, is installed from the repository (no PyPI), has
+no dependencies, and supports Python 3.9+.
+
+### 9.1 Its own RESP client
+
+`baton.resp` is ~200 lines: an encoder, an incremental reply parser and a
+blocking socket connection. redis-py works against baton (the integration
+tests prove it and keep proving it), but the SDK does not use it:
+
+- **Timeouts are part of the semantics.** A blocking `RESERVE` must wait
+  `timeout_ms` plus a margin, everything else should fail fast. With a
+  general-purpose client that is a per-call fight with a connection pool.
+- **Retries are part of the semantics too** (next section). A library that
+  transparently reconnects and resends — as Redis clients reasonably do for
+  Redis — would turn one `ENQUEUE` into two jobs.
+- Zero dependencies means a worker image needs nothing but Python.
+
+A `Connection` is one socket and is not thread-safe; nothing in the SDK shares
+one between threads. RESP2 only: the SDK never sends `HELLO 3`.
+
+### 9.2 What is retried, and what is not
+
+When a connection dies between sending a request and reading its reply, the
+client cannot know whether the command ran. What the SDK does next depends on
+the command, and the rule is: **retry only when a duplicate is impossible.**
+
+| Command | After an ambiguous failure |
+|---|---|
+| `ENQUEUE` with a `key` | Retried on a fresh connection. The idempotency key makes the second attempt return the first one's job id. |
+| `ENQUEUE` without a key | **Not retried.** `EnqueueUncertain` is raised: the job may or may not exist, and only the caller knows whether a duplicate or a loss is worse. The message says so and points at `key=`. |
+| `ACK`, `FAIL`, `HEARTBEAT` | Retried. If the first attempt did run, the retry answers `STALE`; for `ACK` the SDK then asks `STATUS`, and `succeeded` means the ack went through. Anything else means the lease really is gone. |
+| `RESERVE` | Retried by the worker loop. A job leased to a connection that died before the reply arrived is delivered again when its lease expires — at-least-once absorbs it (the server-side fix is on the roadmap). |
+| reads | Retried. |
+
+Failures *before* anything was sent (connect refused, the server restarting)
+are always retried, with capped exponential backoff, for up to
+`connect_timeout` overall. The SDK does not generate idempotency keys behind
+the caller's back: every key costs server memory for the 24-hour window, and a
+random key would make the retry safe while defeating the purpose of keys
+(deduplicating the *caller's* retries, which a fresh random key per call does
+not).
+
+Errors map to exceptions by code, never by message: `StaleLease`, `NotFound`,
+`WrongState`, `LimitExceeded`, `AuthError`, `Unavailable`, `ProtocolError`,
+all under `BatonError`.
+
+### 9.3 The worker
+
+```python
+worker = baton.Worker(queues=["emails"], concurrency=8, lease_ms=30_000)
+
+@worker.task("send_email")
+def send_email(to, subject): ...
+
+worker.run()          # until SIGTERM / SIGINT
+```
+
+**Task envelope.** A task job's payload is JSON:
+`{"task": "send_email", "args": [...], "kwargs": {...}}`, produced by
+`client.enqueue_task(queue, name, args, kwargs, **options)` — the task's
+arguments are passed as a list and a dict, not splatted, so that they can never
+collide with enqueue options such as `key=` or `priority=`. JSON because any language
+can produce it and a human can read it in `STATUS … PAYLOAD`; pickle would tie
+producers to Python and execute whatever the queue contains. A worker can also
+register a raw handler per queue for payloads that are not envelopes.
+
+**Threads, one connection each.** `concurrency` worker threads each own a
+connection and loop: blocking `RESERVE` (short timeout, so shutdown is
+prompt) → run the handler → `ACK` or `FAIL`. Threads rather than asyncio
+because handlers are arbitrary user code that blocks; rather than processes
+because the jobs of a queue system are mostly I/O-bound and one process is
+simpler to supervise. CPU-bound work scales by running more worker processes —
+the server does not care how many connections come from where.
+
+**Heartbeats.** One more thread, with its own connection, extends the lease of
+every in-flight job every `lease_ms / 3`. A handler may therefore run for
+hours while a crashed worker's jobs come back after `lease_ms`. Two details
+matter:
+
+- If a heartbeat answers `STALE` or `NOTFOUND`, the lease is lost (expired
+  during a long GC pause or a network partition, or the job was cancelled).
+  The job's context is flagged — `job.lease_lost` is visible to the handler,
+  which should stop at the next convenient point — and the SDK will not `ACK`
+  or `FAIL` it: the result of a run that lost its lease is discarded, because
+  another worker may already own the job.
+- If heartbeats cannot reach the server at all, the SDK keeps trying; once the
+  lease's known expiry passes without a successful extension the job is flagged
+  the same way. The worker never assumes it still holds a lease it could not
+  confirm.
+
+This is fencing at the SDK level, not a guarantee of mutual exclusion: a
+handler that ignores `lease_lost`, or is stuck in a system call, keeps running
+while the job is redelivered. Handlers that write to systems which can compare
+numbers should pass `job.token` along as a fencing token (section 5.5).
+
+**Outcomes.** Return → `ACK`. Exception → `FAIL` with the exception's type and
+message (the server backs off and retries up to `max_attempts`, then
+dead-letters). `raise baton.Retry(in_ms=…)` chooses the delay;
+`raise baton.Fatal(…)` dead-letters at once (`NORETRY`). A job for a task name
+this worker does not know fails *with* retry: during a rolling deploy the next
+attempt may land on a worker that knows it.
+
+**Graceful shutdown.** SIGTERM or SIGINT: stop reserving; let running handlers
+finish for up to `shutdown_timeout` (default 30 s) while heartbeats continue;
+then stop. Jobs still running at the deadline are abandoned, not failed: the
+process is about to die, their leases expire, and they are redelivered —
+exactly what would happen after `kill -9`, which is the case the system is
+built for anyway. A second signal skips the wait. A job handed over by a
+`RESERVE` that was already in flight when the signal arrived is run like any
+other rather than dropped, because dropping it would cost one of its attempts.
+
+### 9.4 Doing something once: `baton.idempotent`
+
+At-least-once delivery means a handler can run twice: the worker dies after the
+side effect and before the `ACK`, or loses its lease mid-run. The honest
+position is that **exactly-once effects cannot be bolted on from outside**: the
+effect and the record of having done it must commit atomically, or there is a
+window where a crash repeats the effect (record after) or loses it (record
+before). The helper is built around that fact instead of hiding it:
+
+- `Ledger` is a small durable set: an append-only, checksummed, fsynced file
+  with `put_if_absent(key, value)` under an inter-process file lock. When the
+  side effect *is* the ledger entry (or lives in a database that can do the
+  same thing in a transaction), duplicates are impossible: the second run sees
+  the key and skips. The chaos harness (M7) uses exactly this to check
+  exactly-once effects under kills.
+- `ledger.once(key, fn)` is for effects that live elsewhere (send the email,
+  call the API): run `fn`, then record the key with its result; a later run
+  with the same key returns the recorded result without calling `fn`. The
+  docstring states the contract without decoration: *at least once, and at
+  most once after it has been recorded*. A crash between `fn` and the record
+  repeats `fn`. If that is not acceptable, the remote system needs an
+  idempotency key of its own — pass it `job.id`.
+- Entries carry the fencing token; an entry from a lower token than one
+  already recorded for the key is rejected, so a zombie cannot overwrite the
+  result of the run that superseded it.
+
+The natural key is the job id (`job.id`), which is stable across redeliveries.
+
+### 9.5 Test plan
+
+Against the real server binary (pytest, no mocks of the server): task round
+trip; every error code maps to its exception; a handler that outlives several
+lease periods is delivered once (heartbeats); a worker process killed with
+SIGKILL mid-job → the job is redelivered and completes elsewhere; SIGTERM lets
+the running job finish, acks it, and exits 0 without taking new jobs;
+cancelling a running job flips `lease_lost` and suppresses the `ACK`; server
+restart mid-run (reconnect, keyed enqueue retried, unkeyed enqueue raises
+`EnqueueUncertain`); `Retry` / `Fatal` / unknown task; the ledger under
+concurrent processes and after a torn final write. The RESP codec gets plain
+unit tests including byte-at-a-time feeding.
+
+"The connection died after the request was sent" is produced on demand by a
+small TCP proxy in the tests that forwards a request, waits until the server
+has answered it, and then drops the reply and the connection. That makes the
+ambiguous case deterministic: the tests can show both that a keyed `ENQUEUE`
+ends up as exactly one job and that an unkeyed one really did execute when the
+SDK refuses to guess.
+
+### 9.6 Limitations
+
+- **Threads and the GIL.** Handlers share one interpreter: fine for I/O-bound
+  work, no speedup for CPU-bound work (run more processes). There is no asyncio
+  API.
+- **`lease_lost` is cooperative.** A handler that never looks, or is stuck in a
+  system call, keeps running after its job has been given to someone else. The
+  SDK discards its result; it cannot stop it. Use the fencing token downstream.
+- **Lease bookkeeping is local and slightly optimistic**: the worker counts a
+  new lease from the moment the `RESERVE` reply arrived, which is later than
+  the moment the server granted it by one network latency. Heartbeats, counted
+  from when they were *sent*, are conservative.
+- **One heartbeat thread, serial.** With very many long jobs and a slow server
+  the round can take longer than planned; the `lease / 3` interval is the
+  slack.
+- **A lease granted by a `RESERVE` whose reply was lost** is not released; the
+  job waits out the lease (roadmap: server-side release on disconnect).
+- **The `Ledger` is for one machine**: it relies on `flock`, which is not
+  dependable on network file systems, and is POSIX-only. It never compacts —
+  one small entry per key forever, all keys in memory — so long-lived users
+  should rotate it (for instance one ledger per month, keyed by job id).
+- **Shutdown while the server is unreachable** can take up to the reserve
+  timeout plus the client's retry window before the worker threads notice.
 
 ---
 
