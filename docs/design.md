@@ -14,6 +14,7 @@ Contents:
 4. [M1 — The durable log](#4-m1--the-durable-log)
 5. [M2 — The state machine](#5-m2--the-state-machine)
 6. [M3 — Networking](#6-m3--networking)
+7. [M4 — Leases, retries, time and the dead-letter queue](#7-m4--leases-retries-time-and-the-dead-letter-queue)
 
 ---
 
@@ -848,6 +849,186 @@ cross-protocol requests from browsers cannot execute anything.
   fills faster than that still ends in the abort-and-recover path of 4.3.
 - **Host names are not resolved for `--bind`**, only address literals, so what
   baton listens on never depends on DNS.
+
+## 7. M4 — Leases, retries, time and the dead-letter queue
+
+The mechanisms (lease records, fencing tokens, backoff, the timing wheel) were
+built in M2. This section settles the policies around them: why delivery is
+at-least-once, what a restart does to leases, what a clock jump does to timers,
+and how the dead-letter queue is operated.
+
+### 7.1 Why delivery is at-least-once, and what to do about it
+
+A worker finishes a job and sends `ACK`. One of three things happens:
+
+1. The `ACK` is logged and the worker sees `+OK`. Done, exactly once.
+2. The worker (or the network) dies **before** the `ACK` reaches baton. baton
+   cannot tell "finished but could not say so" from "died halfway": both look
+   like silence. The lease expires and the job runs again.
+3. The `ACK` is logged but the reply is lost. The worker does not know whether
+   it succeeded; if it retries it gets `STALE`, which is safe.
+
+Case 2 is not a baton limitation. No system can make "perform a side effect in
+the outside world" and "record that it was performed" one atomic step when they
+live in different failure domains: the process can always die between the two.
+Every job system must therefore choose: redeliver when unsure (at-least-once,
+possible duplicates) or never redeliver (at-most-once, possible loss). For
+background jobs, loss is worse than duplication, so baton redelivers.
+
+What is achievable is that each **side effect happens exactly once**, by making
+the effect idempotent. baton supplies three tools:
+
+- **Idempotency keys on `ENQUEUE`**, so a producer that retries after a timeout
+  does not create a second job.
+- **A stable job id and attempt number** in every delivery. A handler can use
+  `(job id)` as the deduplication key for its effect: "INSERT … ON CONFLICT DO
+  NOTHING", a payment provider's idempotency key, a marker file. The SDK's
+  idempotency helper (M6) packages this pattern.
+- **Fencing tokens.** A zombie — a worker that stalled past its lease and then
+  resumed — is refused by baton (`STALE`), and the token lets a downstream
+  resource refuse it as well: tokens only increase, so "reject writes carrying
+  a token lower than one I have already seen for this job" closes the last
+  window, where a zombie's write races the new worker's.
+
+### 7.2 The lease lifecycle
+
+```
+RESERVE ──► JobLeased{token, expires_at}            (logged; the reply waits for it)
+HEARTBEAT ► LeaseExtended{token, new expires_at}    (logged; resets the expiry timer)
+ACK ──────► JobSucceeded{token}
+FAIL ─────► AttemptFailed{worker_failed, retry_at | dead}
+(silence) ► AttemptFailed{lease_expired, retry_at | dead}   written by the server's timer
+CANCEL ───► JobCancelled                            the holder learns via STALE
+```
+
+A lease ends only when one of these records is applied. In particular expiry is
+a *record*, produced when the expiry timer fires, not a comparison against the
+clock made by whoever happens to look. Two consequences: `ACK` is judged
+against state alone (if no expiry record exists yet, the lease is still the
+current one and the `ACK` wins), and replay never has to guess whether a lease
+"would have" expired.
+
+Heartbeats are logged, so they cost a log record each. That is deliberate: an
+extended lease that was not durable would shrink back after a crash, and a
+worker that did everything right would see its job handed to someone else.
+
+### 7.3 Restarts: leases survive, with a grace period
+
+**Decision:** when the server restarts, leases that were active stay active
+under the same tokens. A worker that outlived the server reconnects and
+`ACK`s, `FAIL`s or heartbeats as if nothing had happened.
+
+The subtlety is downtime. While the server is down, workers *cannot*
+heartbeat; a lease that was perfectly healthy may be past its expiry when the
+server comes back. Expiring those leases at startup would re-run every
+in-flight job after every restart — a guaranteed duplicate-execution storm —
+to punish workers for the server's outage. So at startup each lease's expiry
+timer is set to `max(its persisted expiry, now + --lease-grace)` (default 5 s):
+every worker gets at least one grace period to reconnect and heartbeat. The
+persisted expiry itself is not rewritten; the grace only affects when the timer
+fires.
+
+Alternatives considered:
+
+- *Void all leases on restart.* Simple, and no worker could ever hold a lease
+  the server has forgotten, but every restart duplicates all in-flight work,
+  and zero-downtime upgrades become impossible.
+- *Expire by persisted deadline, no grace.* Punishes workers for downtime they
+  did not cause (see above).
+- *Extend every lease by the measured downtime.* More precise, but needs a
+  trustworthy "when did I stop" (a crash leaves none) and a wall clock that did
+  not move meanwhile.
+
+What is lost in a crash is only what was never acknowledged: a `RESERVE` whose
+reply never left the server leaves a lease nobody knows they hold. It expires
+(after the grace) and the job is redelivered. Correct, merely slow for that job.
+
+### 7.4 Wall-clock jumps
+
+Deadlines are persisted as wall-clock times (nothing else survives a restart),
+but timers run on the monotonic clock (nothing else is safe from jumps). The
+two are reconciled at two moments only:
+
+1. **When a timer is set:** `mono_deadline = mono_now + max(0, wall_deadline −
+   wall_now)`. From then on the timer is immune to wall-clock changes: a lease
+   of 30 s lasts 30 s of real time even if NTP steps the clock meanwhile.
+2. **When the offset between the clocks changes abruptly.** Each loop iteration
+   the engine computes `wall_now − mono_now`. Slewing moves this by at most
+   0.05 %, far below one millisecond per iteration; a change of more than
+   `1 s` between two iterations can only be a step (an NTP correction, an
+   operator setting the date, a VM or laptop resuming from suspend — Linux's
+   monotonic clock does not count suspended time). On a step baton logs a
+   warning and **re-derives every timer from its persisted wall-clock deadline,
+   through the same code path as a restart**, lease grace included.
+
+So a clock jump is treated exactly like a restart, and there is only one
+rebuild path to test. After a forward jump, delayed jobs whose wall-clock time
+has now arrived run at once (their `AT 09:00` really is in the past), while
+leases get the grace period instead of expiring en masse. After a backward
+jump, delayed jobs wait until the wall clock reaches their time again; leases,
+whose persisted expiry is now "further away", keep at least their remaining
+time.
+
+Steps smaller than the threshold are ignored; their only effect is that timers
+set before the step fire up to that much early or late relative to the new
+wall clock. Across a restart the same rule applies implicitly: timers are
+derived from wall-clock deadlines, so a clock that moved while baton was down
+shifts them by that amount. Run NTP in slew mode on production hosts.
+
+### 7.5 The dead-letter queue
+
+A job whose last attempt fails becomes `dead`: it keeps its payload, last error
+and attempt count, leaves the ready structures, and is indexed per queue by job
+id. It stays for `--retain-dead` (7 days) and then is collected like any
+finished job.
+
+- `DLQ.LIST queue [offset [count]]` pages through it, oldest first.
+- `DLQ.RETRY id` / `DLQ.RETRY queue ALL` logs `DeadJobRetried`: the job is
+  ready again *now*, with attempts reset to 0 (a fresh budget — the operator
+  presumably fixed something) and its last error kept for context. Fencing is
+  unaffected because tokens are server-wide, not per attempt.
+- `DLQ.PURGE id` / `DLQ.PURGE queue ALL` logs `JobsPurged` (in chunks of 10,000
+  ids) and deletes the jobs. Purging is logged, unlike retention-based
+  collection, because it is an operator's decision rather than a function of
+  time.
+
+### 7.6 Test plan
+
+Engine level, with `FakeClock`: every DLQ operation and its errors; the model
+test gains DLQ retry/purge so replay equivalence covers their records; forward
+and backward clock jumps (delayed jobs, leases and the grace period); slow
+drift never triggers a rebuild. Through the wire, in real time: a worker
+`ACK`s after a restart; a lease that "expired" during downtime is still
+honoured within the grace period and redelivered with a new token after it;
+DLQ commands under RESP2 and RESP3. Mutants: restart grace ignored; clock jumps
+not detected.
+
+### 7.7 Known limitations (recorded after implementation)
+
+- **A backward clock step plus a restart can make recently expired things
+  visible again.** Visibility of idempotency keys and finished jobs is defined
+  by timestamps, and collection is not logged (5.6). Live, something collected
+  at 12:00 stays gone; but if the wall clock is then stepped back to 11:50 and
+  the server restarts, replay rebuilds the entry and, at 11:50, it has not
+  expired yet. The effects are benign — a key deduplicates a little longer, a
+  finished job answers `STATUS` again for a while — and they need a backward
+  step *and* a restart inside the retention window. The model-based test
+  therefore simulates forward steps only; backward steps are covered by
+  targeted tests.
+- **A backward step lengthens leases** by up to the size of the step, because
+  the persisted expiry is now further away and baton never shortens a lease
+  behind a worker's back. A forward step cannot shorten them either (grace).
+- **Re-deriving timers is O(jobs).** A clock step or a restart walks every job
+  once. At a million jobs that is a pause of a few hundred milliseconds, for an
+  event that should be rare; M5 measures the same walk as part of recovery.
+- **Steps below the threshold (1 s) are not corrected.** Timers set before such
+  a step fire that much early or late relative to the new wall clock.
+- **`DLQ.RETRY queue ALL` logs one record per job** and `DLQ.LIST` walks an
+  ordered set to reach its offset; both are operator commands on what should
+  be a small set, not hot paths.
+- **The grace period is one number for all leases.** A worker whose lease was
+  hours long and a worker whose lease was 100 ms get the same grace after a
+  restart.
 
 ---
 
