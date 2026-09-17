@@ -19,12 +19,9 @@
     },
     {
       "name": "release",
-      "displayName": "Release (optimized, with tests and benchmarks)",
+      "displayName": "Release (optimized, with tests)",
       "inherits": "base",
-      "cacheVariables": {
-        "CMAKE_BUILD_TYPE": "Release",
-        "BATON_BUILD_BENCH": "ON"
-      }
+      "cacheVariables": { "CMAKE_BUILD_TYPE": "Release" }
     },
     {
       "name": "asan",

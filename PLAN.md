@@ -38,7 +38,7 @@ Conventions used below:
 - [ ] `.clang-format`, `.clang-tidy`; `scripts/format.sh`, `scripts/check.sh` (what CI runs, runnable locally).
 - [ ] `src/common`: `Result<T>`/`Error`, `BATON_CHECK`, logger, RAII `Fd`, clock interface — with unit tests.
 - [ ] `src/server/main.cpp`: `baton --version` so the binary, Dockerfile, and CI have something real to build.
-- [ ] GitHub Actions: GCC + Clang builds, ASan+UBSan tests, TSan job, macOS build+test, clang-format check, clang-tidy, fuzz smoke job, chaos smoke job (the last two become real in M3/M7; they exist from M0 so the pipeline shape is fixed).
+- [ ] GitHub Actions: GCC + Clang builds, ASan+UBSan tests, TSan job, macOS build+test, clang-format check, clang-tidy, Docker image build. The fuzz job is added with the first fuzz target (M1) and the chaos job with the harness (M7) — a CI job that runs nothing would only pretend to cover something.
 - [ ] Multi-stage `Dockerfile` (build stage → minimal runtime, non-root user, volume for data dir).
 - [ ] Skeletons: `README.md`, `docs/design.md` (M0 section: error handling + logging decisions), `docs/guarantees.md`, `docs/protocol.md`, `docs/testing.md`, `docs/roadmap.md`.
 - [ ] CI green, push.

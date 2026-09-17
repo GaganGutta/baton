@@ -1,0 +1,12 @@
+.git
+.github
+.dev
+build
+docs
+chaos
+bench
+examples
+sdk
+tests
+fuzz
+*.md
