@@ -119,13 +119,14 @@ Conventions used below:
 - [x] CI job for SDK tests; docs; push.
 
 ### M7. Chaos harness
-- [ ] Design section + `docs/testing.md`: harness architecture, seeds, invariants, fault model, how to reproduce a failure from a seed.
-- [ ] `chaos/`: seeded orchestrator (Python): starts server + N worker processes + producers; SIGKILLs server/workers at seeded random moments; restarts; drains; checks.
-- [ ] Producers log every `OK` (job id, idempotency key) to an fsynced journal; handlers write side effects through the idempotency helper to an fsynced ledger and log every run.
-- [ ] Invariant checks 1–5 from the spec (no lost jobs; no two valid leases — verified from the server's own log via an offline log checker **and** from worker-observed tokens; exactly-once ledger effects with duplicate-run count reported; one key → one job; recovery after every kill with recovery time recorded).
-- [ ] Fault injection: truncated log tail (must recover), flipped bit mid-log (must refuse), torn snapshot (must fall back or refuse — never load garbage), full disk (clear error / clean crash, no acknowledged loss, recovers when space returns).
-- [ ] CI short run (fixed seeds, ~2 min); long local run (many seeds, ≥ 30 min), results recorded in docs/testing.md.
-- [ ] Fix every bug found (each gets a regression test); push.
+- [x] Design section + `docs/testing.md`: harness architecture, seeds, invariants, fault model, how to reproduce a failure from a seed.
+- [x] `chaos/`: seeded orchestrator (Python): starts server + N worker processes + producers; SIGKILLs server/workers at seeded random moments (and SIGSTOPs workers into zombies); restarts; drains; checks.
+- [x] Producers log every `OK` (job id, idempotency key) to an fsynced journal; handlers write side effects through the idempotency helper to an fsynced ledger and log every run.
+- [x] Invariant checks 1–5 from the spec (no lost jobs; no two valid leases — verified from the server's own complete log via the offline checker `baton-logcheck` (segments are archived before compaction can delete them), from rogue clients that use dead tokens, **and** from worker-observed tokens; exactly-once ledger effects with extra-run count reported; one key → one job; recovery after every kill with recovery time recorded).
+- [x] Fault injection: torn log tail (must recover), flipped bit mid-log (must refuse), torn snapshot (must fall back — never load garbage), full disk (clean crash on a failed write with no acknowledged loss; `LIMIT` on a nearly full disk, recovers when space returns).
+- [x] `chaos/selftest.sh`: planted bugs must fail their rounds for the right invariant (added: a harness that cannot fail proves nothing; it caught a blind spot in the first rogue client).
+- [x] CI short run (2 seeds × 20 s + faults); long local run (40 seeds × 45 s), results recorded in docs/testing.md.
+- [x] Fix every bug found (each gets a regression test); push. Found: leases expired up to 1 ms early; unsound SDK inference about resent ACKs → `ACK` made idempotent for the completing token.
 
 ### M8. Benchmarks and launch
 - [ ] `bench/loadgen` (C++): pipelined multi-connection load generator, log-bucket latency histogram (p50/p99/p999), modes: enqueue-only, end-to-end with N workers, pickup latency.
