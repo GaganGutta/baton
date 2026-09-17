@@ -15,3 +15,11 @@ baton_add_test(testing_test
   SOURCES
     testing/sim_fs_test.cpp
   LIBS baton_testing)
+
+baton_add_test(log_test
+  SOURCES
+    log/crash_test.cpp
+    log/format_test.cpp
+    log/log_writer_test.cpp
+    log/recovery_test.cpp
+  LIBS baton_log baton_testing)
