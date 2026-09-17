@@ -78,7 +78,10 @@ void field(std::string& reply, std::string_view name, std::string_view value) {
 }  // namespace
 
 const Server::Command* Server::find_command(std::string_view upper_name) {
-  static constexpr std::array<Command, 17> kCommands = {{
+  static constexpr std::array<Command, 20> kCommands = {{
+      {"DLQ.LIST", 2, true, &Server::cmd_dlq_list},
+      {"DLQ.RETRY", 2, true, &Server::cmd_dlq_retry},
+      {"DLQ.PURGE", 2, true, &Server::cmd_dlq_purge},
       {"PING", 1, true, &Server::cmd_ping},
       {"ECHO", 2, true, &Server::cmd_echo},
       {"AUTH", 2, false, &Server::cmd_auth},
@@ -293,6 +296,7 @@ std::string Server::build_info(std::string_view section) const {
     line("recovered_records", recovery_.records_replayed);
     line("recovered_torn_bytes", recovery_.torn_bytes_truncated);
     line("disk_low", disk_low_ ? 1 : 0);
+    line("clock_jumps_detected", engine_->clock_jumps_detected());
     out += "\r\n";
   }
   if (wanted("JOBS")) {
@@ -566,6 +570,55 @@ Server::Verdict Server::cmd_stats(Connection& c, Args args, std::string& reply) 
     }
   }
   return Verdict::kReplied;
+}
+
+// --- dead-letter queue ----------------------------------------------------------------------
+
+Server::Verdict Server::cmd_dlq_list(Connection& c, Args args, std::string& reply) {
+  constexpr uint64_t kDefaultCount = 100;
+  constexpr uint64_t kMaxCount = 1000;
+  const auto offset = args.size() > 2 ? parse_u64(args[2]) : std::optional<uint64_t>(0);
+  const auto count = args.size() > 3 ? parse_u64(args[3]) : std::optional(kDefaultCount);
+  if (!offset || !count || *count == 0 || *count > kMaxCount || args.size() > 4) {
+    syntax_error(reply, "usage: DLQ.LIST <queue> [<offset> [<count>]] with 1 <= count <= 1000");
+    return Verdict::kReplied;
+  }
+  const auto page =
+      engine_->dlq_list(args[1], static_cast<size_t>(*offset), static_cast<size_t>(*count));
+  if (!page.ok()) {
+    reply_error(reply, page.error());
+    return Verdict::kReplied;
+  }
+  resp_array_header(reply, page->size());
+  for (const Job* job : *page) append_job_status(reply, *job, /*with_payload=*/false, c.resp3);
+  return Verdict::kReplied;
+}
+
+Server::Verdict Server::dlq_one_or_all(Args args, std::string& reply, bool purge) {
+  Result<uint64_t> affected = uint64_t{0};
+  if (args.size() == 3 && upper(args[2]) == "ALL") {
+    affected = purge ? engine_->dlq_purge_all(args[1]) : engine_->dlq_retry_all(args[1]);
+  } else if (const auto id = parse_u64(args[1]); id && args.size() == 2) {
+    affected = purge ? engine_->dlq_purge(*id) : engine_->dlq_retry(*id);
+  } else {
+    syntax_error(reply, std::format("usage: DLQ.{0} <job_id> | DLQ.{0} <queue> ALL",
+                                    purge ? "PURGE" : "RETRY"));
+    return Verdict::kReplied;
+  }
+  if (!affected.ok()) {
+    reply_error(reply, affected.error());
+  } else {
+    resp_integer(reply, static_cast<int64_t>(*affected));
+  }
+  return Verdict::kReplied;
+}
+
+Server::Verdict Server::cmd_dlq_retry(Connection& /*c*/, Args args, std::string& reply) {
+  return dlq_one_or_all(args, reply, /*purge=*/false);
+}
+
+Server::Verdict Server::cmd_dlq_purge(Connection& /*c*/, Args args, std::string& reply) {
+  return dlq_one_or_all(args, reply, /*purge=*/true);
 }
 
 }  // namespace baton

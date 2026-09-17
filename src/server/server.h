@@ -139,6 +139,11 @@ class Server {
   Verdict cmd_cancel(Connection& c, Args args, std::string& reply);
   Verdict cmd_status(Connection& c, Args args, std::string& reply);
   Verdict cmd_stats(Connection& c, Args args, std::string& reply);
+  Verdict cmd_dlq_list(Connection& c, Args args, std::string& reply);
+  Verdict cmd_dlq_retry(Connection& c, Args args, std::string& reply);
+  Verdict cmd_dlq_purge(Connection& c, Args args, std::string& reply);
+  // Shared by DLQ.RETRY and DLQ.PURGE: `<job_id>` or `<queue> ALL`.
+  Verdict dlq_one_or_all(Args args, std::string& reply, bool purge);
 
   bool check_password(std::string_view candidate) const;
   std::string build_info(std::string_view section) const;

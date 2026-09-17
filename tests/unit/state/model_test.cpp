@@ -20,6 +20,7 @@
 #include <string>
 #include <vector>
 
+#include "common/logging.h"
 #include "support/engine_fixture.h"
 
 namespace baton {
@@ -83,6 +84,15 @@ class ModelRun {
       do_heartbeat();
     } else if (dice < 86) {
       do_cancel();
+    } else if (dice < 89) {
+      do_dlq();
+    } else if (dice < 90) {
+      // The wall clock is stepped forward (NTP, resume from suspend). Only
+      // forward: after a backward step, things that had already expired can
+      // become visible again after a restart (design.md 7.7), which is exactly
+      // the divergence the replay check would report.
+      clock_.jump_wall(2'000 + static_cast<DurationMs>(pick(20'000)));
+      engine_.tick();
     } else {
       // Time passes: usually a little, sometimes enough to expire leases, keys
       // and retention all at once.
@@ -90,6 +100,38 @@ class ModelRun {
                                    : static_cast<DurationMs>(pick(400)));
       engine_.tick();
     }
+  }
+
+  // An operator works the dead-letter queue: retry or purge, one job or all.
+  void do_dlq() {
+    const std::string queue = queue_name();
+    const auto dead = engine_.dlq_list(queue, 0, 1000);
+    ASSERT_TRUE(dead.ok());
+    const size_t before = dead->size();
+    const bool purge = pick(2) == 0;
+    if (pick(3) == 0) {
+      const auto affected = purge ? engine_.dlq_purge_all(queue) : engine_.dlq_retry_all(queue);
+      ASSERT_TRUE(affected.ok());
+      ASSERT_EQ(*affected, before);
+    } else if (before > 0) {
+      const JobId id = (*dead)[pick(before)]->id;
+      const auto affected = purge ? engine_.dlq_purge(id) : engine_.dlq_retry(id);
+      ASSERT_TRUE(affected.ok());
+      const Job* job = state_.find_job(id);
+      ASSERT_EQ(job == nullptr, purge);
+      if (!purge) {
+        ASSERT_TRUE(is_pending(job->state) && job->attempts == 0);
+      }
+    } else {
+      // Nothing dead in this queue: aim at an arbitrary job instead.
+      const JobId id = 1 + pick(state_.next_job_id());
+      const Job* job = state_.find_job(id);
+      const bool is_dead = job != nullptr && job->state == JobState::kDead;
+      ASSERT_EQ(engine_.dlq_retry(id).ok(), is_dead);
+    }
+    const auto after = engine_.dlq_list(queue, 0, 1000);
+    ASSERT_TRUE(after.ok());
+    ASSERT_LE(after->size(), before);
   }
 
   void do_enqueue() {
@@ -222,6 +264,7 @@ class ModelRun {
 };
 
 TEST(StateModelTest, RandomTrafficKeepsInvariantsAndReplaysExactly) {
+  set_log_level(LogLevel::kError);  // every simulated clock step logs a warning
   size_t records = 0;
   for (uint64_t seed = 1; seed <= 12; ++seed) {
     SCOPED_TRACE("seed " + std::to_string(seed));
@@ -232,6 +275,7 @@ TEST(StateModelTest, RandomTrafficKeepsInvariantsAndReplaysExactly) {
   }
   // Sanity: the run really exercised the machine.
   EXPECT_GT(records, 12U * 1'000);
+  set_log_level(LogLevel::kInfo);
 }
 
 }  // namespace

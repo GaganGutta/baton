@@ -366,6 +366,116 @@ TEST_F(ServerTest, ShutdownAnswersParkedReservesAndFlushesAcknowledgements) {
   EXPECT_TRUE(worker.wait_for_close());
 }
 
+// --- leases across restarts (docs/design.md 7.3) --------------------------------------------
+
+class ServerLeaseGraceTest : public ServerTest {
+ protected:
+  ServerConfig config() const override {
+    ServerConfig c = ServerTest::config();
+    c.engine.lease_grace_ms = 600;
+    return c;
+  }
+
+  // The server is down for longer than the lease had left: no heartbeat could
+  // have got through. (A real delay: downtime is the scenario.)
+  void restart_after_downtime() {
+    stop();
+    std::this_thread::sleep_for(std::chrono::milliseconds(250));
+    start(fs_);
+  }
+};
+
+TEST_F(ServerLeaseGraceTest, WorkerThatOutlivedTheServerCanStillFinishWithinTheGracePeriod) {
+  {
+    RespClient c = connect();
+    ASSERT_EQ(c.command({"ENQUEUE", "q", "x", "BACKOFF", "0", "0"}), ":1");
+    ASSERT_TRUE(StartsWith(c.command({"RESERVE", "0", "100", "q"}), "[:1, :1,"));
+  }
+  restart_after_downtime();  // the 100 ms lease is nominally long expired
+
+  RespClient c = connect();
+  EXPECT_NE(c.command({"STATUS", "1"}).find("$state, $leased"), std::string::npos)
+      << "a restart must not expire leases that could not be renewed while it was down";
+  EXPECT_TRUE(StartsWith(c.command({"HEARTBEAT", "1", "1", "5000"}), ":17"));
+  EXPECT_EQ(c.command({"ACK", "1", "1"}), "+OK");
+}
+
+TEST_F(ServerLeaseGraceTest, SilenceAfterTheGracePeriodStillExpiresTheLease) {
+  {
+    RespClient c = connect();
+    ASSERT_EQ(c.command({"ENQUEUE", "q", "x", "BACKOFF", "0", "0"}), ":1");
+    ASSERT_TRUE(StartsWith(c.command({"RESERVE", "0", "100", "q"}), "[:1, :1,"));
+  }
+  restart_after_downtime();
+
+  RespClient c = connect();
+  // Blocks until the grace period ends and the job is redelivered.
+  EXPECT_TRUE(StartsWith(c.command({"RESERVE", "10000", "5000", "q"}), "[:1, :2, $q, $x, :2,"));
+  EXPECT_TRUE(StartsWith(c.command({"ACK", "1", "1"}), "-STALE")) << "the old holder is fenced";
+  EXPECT_EQ(c.command({"ACK", "1", "2"}), "+OK");
+}
+
+// --- dead-letter queue ---------------------------------------------------------------------
+
+TEST_F(ServerTest, DeadLetterQueueOverTheWire) {
+  RespClient c = connect();
+  for (int i = 1; i <= 4; ++i) {
+    const std::string id = std::to_string(i);
+    ASSERT_EQ(c.command({"ENQUEUE", "mail", "payload-" + id}), ":" + id);
+    ASSERT_TRUE(StartsWith(c.command({"RESERVE", "0", "1000", "mail"}), "[:" + id + ", :" + id));
+    ASSERT_EQ(c.command({"FAIL", id, id, "smtp down", "NORETRY"}), "[$dead, :0]");
+  }
+  EXPECT_NE(c.command({"STATS", "mail"}).find("$dead, :4"), std::string::npos);
+
+  const std::string all = c.command({"DLQ.LIST", "mail"});
+  EXPECT_TRUE(StartsWith(all, "[[$id, :1, $queue, $mail, $state, $dead,")) << all;
+  EXPECT_NE(all.find("$last_error, $smtp down"), std::string::npos);
+  EXPECT_TRUE(StartsWith(c.command({"DLQ.LIST", "mail", "2", "1"}), "[[$id, :3,"));
+  EXPECT_EQ(c.command({"DLQ.LIST", "mail", "9"}), "[]");
+  EXPECT_EQ(c.command({"dlq.list", "empty-queue"}), "[]");
+  EXPECT_TRUE(StartsWith(c.command({"DLQ.LIST", "mail", "0", "5000"}), "-ERR usage:"));
+
+  EXPECT_EQ(c.command({"DLQ.RETRY", "1"}), ":1");
+  EXPECT_TRUE(StartsWith(c.command({"DLQ.RETRY", "1"}), "-STATE job 1 is ready, not dead"));
+  EXPECT_TRUE(StartsWith(c.command({"DLQ.RETRY", "99"}), "-NOTFOUND"));
+  EXPECT_TRUE(
+      StartsWith(c.command({"RESERVE", "0", "1000", "mail"}), "[:1, :5, $mail, $payload-1, :1,"))
+      << "retried: a new token, and attempts start over";
+
+  EXPECT_EQ(c.command({"DLQ.PURGE", "2"}), ":1");
+  EXPECT_TRUE(StartsWith(c.command({"STATUS", "2"}), "-NOTFOUND"));
+  EXPECT_EQ(c.command({"DLQ.RETRY", "mail", "ALL"}), ":2");
+  EXPECT_EQ(c.command({"DLQ.PURGE", "mail", "all"}), ":0");
+  EXPECT_TRUE(StartsWith(c.command({"DLQ.PURGE", "mail", "SOME"}), "-ERR usage:"));
+  EXPECT_NE(c.command({"STATS", "mail"}).find("$ready, :2"), std::string::npos);
+
+  // RESP3 connections get each entry as a map.
+  ASSERT_TRUE(StartsWith(c.command({"RESERVE", "0", "1000", "mail"}), "[:3,"));
+  ASSERT_EQ(c.command({"FAIL", "3", "6", "again", "NORETRY"}), "[$dead, :0]");
+  ASSERT_TRUE(StartsWith(c.command({"HELLO", "3"}), "{$server:"));
+  EXPECT_TRUE(StartsWith(c.command({"DLQ.LIST", "mail"}), "[{$id: :3, $queue: $mail,"));
+}
+
+TEST_F(ServerTest, DeadLetterOperationsSurviveARestart) {
+  {
+    RespClient c = connect();
+    for (int i = 1; i <= 3; ++i) {
+      const std::string id = std::to_string(i);
+      ASSERT_EQ(c.command({"ENQUEUE", "q", "x"}), ":" + id);
+      ASSERT_TRUE(StartsWith(c.command({"RESERVE", "0", "1000", "q"}), "[:" + id));
+      ASSERT_EQ(c.command({"FAIL", id, id, "e", "NORETRY"}), "[$dead, :0]");
+    }
+    ASSERT_EQ(c.command({"DLQ.RETRY", "1"}), ":1");
+    ASSERT_EQ(c.command({"DLQ.PURGE", "2"}), ":1");
+  }
+  stop();
+  start(fs_);
+  RespClient c = connect();
+  EXPECT_NE(c.command({"STATUS", "1"}).find("$state, $ready"), std::string::npos);
+  EXPECT_TRUE(StartsWith(c.command({"STATUS", "2"}), "-NOTFOUND"));
+  EXPECT_TRUE(StartsWith(c.command({"DLQ.LIST", "q"}), "[[$id, :3,"));
+}
+
 // --- protocol errors and limits -------------------------------------------------------------
 
 TEST_F(ServerTest, ProtocolErrorsGetAnErrorReplyAndAClosedConnection) {

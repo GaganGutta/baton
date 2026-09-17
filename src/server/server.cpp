@@ -86,7 +86,7 @@ Status Server::open_storage() {
   BATON_ASSIGN_OR_RETURN(const RecoveredLog recovered,
                          recover_log(fs_, config_.dir, LogRecoveryOptions{}, replay));
   state_->set_now(clock_.wall_now(), clock_.mono_now());
-  state_->end_replay(config_.lease_grace_ms);
+  state_->end_replay(config_.engine.lease_grace_ms);
 
   LogWriterOptions log_options;
   log_options.dir = config_.dir;

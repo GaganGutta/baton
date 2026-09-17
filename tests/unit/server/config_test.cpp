@@ -66,7 +66,7 @@ TEST(ConfigTest, ParsesEveryOption) {
   EXPECT_EQ(c.state.retain_finished_ms, 3'600'000);
   EXPECT_EQ(c.state.retain_dead_ms, DurationMs{30} * 86'400'000);
   EXPECT_EQ(c.engine.idempotency_window_ms, DurationMs{2} * 86'400'000);
-  EXPECT_EQ(c.lease_grace_ms, 10'000);
+  EXPECT_EQ(c.engine.lease_grace_ms, 10'000);
   EXPECT_EQ(c.log_level, LogLevel::kWarn);
 }
 

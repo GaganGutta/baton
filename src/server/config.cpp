@@ -153,7 +153,7 @@ Result<ParsedArgs> parse_args(std::span<const std::string_view> args) {
     } else if (flag == "--idempotency-window") {
       BATON_ASSIGN_OR_RETURN(config.engine.idempotency_window_ms, parse_duration_ms(value));
     } else if (flag == "--lease-grace") {
-      BATON_ASSIGN_OR_RETURN(config.lease_grace_ms, parse_duration_ms(value));
+      BATON_ASSIGN_OR_RETURN(config.engine.lease_grace_ms, parse_duration_ms(value));
     } else if (flag == "--log-level") {
       const auto level = parse_log_level(value);
       if (!level) return bad("--log-level must be debug, info, warn, error or off");

@@ -30,11 +30,8 @@ struct ServerConfig {
   uint64_t max_log_backlog_bytes = uint64_t{64} << 20U;  // stop reading clients beyond this
   size_t max_output_buffer_bytes = size_t{64} << 20U;    // close clients that do not read
   DurationMs max_reserve_timeout_ms = 3'600'000;
-  // After a restart or a wall-clock jump, leases get at least this long before
-  // they can expire, so workers that could not heartbeat are not punished (M4).
-  DurationMs lease_grace_ms = 5'000;
 
-  EngineOptions engine;
+  EngineOptions engine;  // includes lease_grace_ms (--lease-grace)
   StateOptions state;
   LogLevel log_level = LogLevel::kInfo;
 };

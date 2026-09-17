@@ -55,6 +55,14 @@ struct EngineOptions {
   DurationMs max_delay_ms = DurationMs{366} * 24 * 60 * 60 * 1000;
   uint32_t max_max_attempts = 1'000;
 
+  // Time (docs/design.md 7.3, 7.4). After a restart or a wall-clock jump every
+  // lease gets at least this long before it can expire, so that workers which
+  // could not heartbeat meanwhile are not punished for it.
+  DurationMs lease_grace_ms = 5'000;
+  // A change of (wall clock - monotonic clock) larger than this between two
+  // ticks is a clock step, not slew, and makes the engine re-derive all timers.
+  DurationMs clock_jump_threshold_ms = 1'000;
+
   static constexpr size_t kMaxQueueNameBytes = 128;
   static constexpr size_t kMaxIdemKeyBytes = 256;
   static constexpr size_t kMaxErrorBytes = 1024;  // longer FAIL messages are truncated
@@ -127,6 +135,20 @@ class Engine {
   Result<FailResult> fail(const FailRequest& request);
   Status cancel(JobId id);
 
+  // --- dead-letter queue (docs/design.md 7.5) -----------------------------------------
+  // Up to `count` dead jobs of `queue`, oldest first, skipping `offset`.
+  Result<std::vector<const Job*>> dlq_list(std::string_view queue, size_t offset,
+                                           size_t count) const;
+  // Makes dead jobs ready again now, with a fresh set of attempts. Returns how many.
+  Result<uint64_t> dlq_retry(JobId id);
+  Result<uint64_t> dlq_retry_all(std::string_view queue);
+  // Deletes dead jobs. Returns how many.
+  Result<uint64_t> dlq_purge(JobId id);
+  Result<uint64_t> dlq_purge_all(std::string_view queue);
+
+  // How many wall-clock steps tick() has detected (and re-anchored timers for).
+  uint64_t clock_jumps_detected() const { return clock_jumps_; }
+
   // The LSN of the most recently appended record. A reply generated now must
   // not be sent before this LSN is durable.
   Lsn last_lsn() const { return last_lsn_; }
@@ -140,8 +162,10 @@ class Engine {
 
  private:
   void log_and_apply(const Record& record);
+  void detect_clock_jump();
   // Checks that `token` holds the current lease on job `id`.
   Result<const Job*> find_leased(JobId id, LeaseToken token) const;
+  Result<const Job*> find_dead(JobId id) const;
   AttemptFailed decide_failure(const Job& job, FailureReason reason, std::string_view error,
                                std::optional<DurationMs> retry_in_ms, bool no_retry);
 
@@ -151,6 +175,8 @@ class Engine {
   EngineOptions options_;
   std::mt19937_64 rng_;
   Lsn last_lsn_;
+  DurationMs clock_offset_ms_ = 0;  // wall - monotonic, as of the previous tick
+  uint64_t clock_jumps_ = 0;
   std::string scratch_;                // record encoding buffer
   std::vector<JobId> expired_leases_;  // scratch for tick()
 };

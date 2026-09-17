@@ -1,9 +1,12 @@
 #include "state/engine.h"
 
 #include <algorithm>
+#include <cstdlib>
 #include <format>
+#include <iterator>
 
 #include "common/check.h"
+#include "common/logging.h"
 
 namespace baton {
 namespace {
@@ -34,7 +37,10 @@ Engine::Engine(State& state, RecordSink& sink, const Clock& clock, EngineOptions
       options_(options),
       rng_(rng_seed),
       last_lsn_(last_lsn) {
-  state_.set_now(clock_.wall_now(), clock_.mono_now());
+  const WallTime wall = clock_.wall_now();
+  const MonoTime mono = clock_.mono_now();
+  state_.set_now(wall, mono);
+  clock_offset_ms_ = wall.ms - mono.ms;
 }
 
 // Apply before append: if a handler ever built a record that does not fit the
@@ -49,8 +55,23 @@ void Engine::log_and_apply(const Record& record) {
   last_lsn_ = sink_.append(type_of(record), scratch_);
 }
 
+// A wall-clock step is handled exactly like a restart: every timer is re-derived
+// from its persisted wall-clock deadline, and leases get the grace period
+// (docs/design.md 7.4). Slew never comes close to the threshold between ticks.
+void Engine::detect_clock_jump() {
+  const DurationMs offset = state_.wall_now().ms - clock_.mono_now().ms;
+  const DurationMs change = offset - clock_offset_ms_;
+  clock_offset_ms_ = offset;
+  if (std::abs(change) <= options_.clock_jump_threshold_ms) return;
+  ++clock_jumps_;
+  BATON_WARN("engine", "wall clock stepped by {} ms: re-deriving timers from their deadlines",
+             change);
+  state_.rebuild_derived(options_.lease_grace_ms);
+}
+
 void Engine::tick() {
   state_.set_now(clock_.wall_now(), clock_.mono_now());
+  detect_clock_jump();
 
   expired_leases_.clear();
   state_.advance_timers(expired_leases_);
@@ -209,6 +230,73 @@ Status Engine::cancel(JobId id) {
   }
   log_and_apply(JobCancelled{.id = id, .at = state_.wall_now()});
   return {};
+}
+
+// --- dead-letter queue ---------------------------------------------------------------
+
+namespace {
+
+constexpr size_t kPurgeChunk = 10'000;  // ids per JobsPurged record
+
+}  // namespace
+
+Result<const Job*> Engine::find_dead(JobId id) const {
+  const Job* job = state_.find_job(id);
+  if (job == nullptr) return Error{ErrorCode::kNotFound, std::format("no such job: {}", id)};
+  if (job->state != JobState::kDead) {
+    return Error{ErrorCode::kFailedPrecondition,
+                 std::format("job {} is {}, not dead", id, to_string(job->state))};
+  }
+  return job;
+}
+
+Result<std::vector<const Job*>> Engine::dlq_list(std::string_view queue, size_t offset,
+                                                 size_t count) const {
+  if (!is_valid_queue_name(queue)) return invalid("queue name must match [A-Za-z0-9._:-]{1,128}");
+  std::vector<const Job*> page;
+  const Queue* q = state_.find_queue(queue);
+  if (q == nullptr || offset >= q->dead.size()) return page;
+  auto it = q->dead.begin();
+  std::advance(it, static_cast<std::ptrdiff_t>(offset));
+  for (; it != q->dead.end() && page.size() < count; ++it) page.push_back(state_.find_job(*it));
+  return page;
+}
+
+Result<uint64_t> Engine::dlq_retry(JobId id) {
+  BATON_ASSIGN_OR_RETURN(const Job* job, find_dead(id));
+  const WallTime now = state_.wall_now();
+  log_and_apply(DeadJobRetried{.id = job->id, .run_at = now, .at = now});
+  return uint64_t{1};
+}
+
+Result<uint64_t> Engine::dlq_retry_all(std::string_view queue) {
+  if (!is_valid_queue_name(queue)) return invalid("queue name must match [A-Za-z0-9._:-]{1,128}");
+  const Queue* q = state_.find_queue(queue);
+  if (q == nullptr) return uint64_t{0};
+  // Copy the ids: applying a retry removes the job from the set being walked.
+  const std::vector<JobId> ids(q->dead.begin(), q->dead.end());
+  const WallTime now = state_.wall_now();
+  for (const JobId id : ids) log_and_apply(DeadJobRetried{.id = id, .run_at = now, .at = now});
+  return static_cast<uint64_t>(ids.size());
+}
+
+Result<uint64_t> Engine::dlq_purge(JobId id) {
+  BATON_ASSIGN_OR_RETURN(const Job* job, find_dead(id));
+  log_and_apply(JobsPurged{.ids = {job->id}});
+  return uint64_t{1};
+}
+
+Result<uint64_t> Engine::dlq_purge_all(std::string_view queue) {
+  if (!is_valid_queue_name(queue)) return invalid("queue name must match [A-Za-z0-9._:-]{1,128}");
+  const Queue* q = state_.find_queue(queue);
+  if (q == nullptr) return uint64_t{0};
+  const std::vector<JobId> ids(q->dead.begin(), q->dead.end());
+  for (size_t start = 0; start < ids.size(); start += kPurgeChunk) {
+    const size_t end = std::min(ids.size(), start + kPurgeChunk);
+    log_and_apply(JobsPurged{.ids = std::vector<JobId>(ids.begin() + static_cast<long>(start),
+                                                       ids.begin() + static_cast<long>(end))});
+  }
+  return static_cast<uint64_t>(ids.size());
 }
 
 DurationMs Engine::backoff_ceiling(uint32_t attempts, uint32_t base_ms, uint32_t cap_ms) {

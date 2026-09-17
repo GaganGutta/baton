@@ -31,6 +31,7 @@ baton_add_test(sched_test
 
 baton_add_test(state_test
   SOURCES
+    state/engine_dlq_time_test.cpp
     state/engine_test.cpp
     state/model_test.cpp
     state/ready_heap_test.cpp
