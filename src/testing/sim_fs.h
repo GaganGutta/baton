@@ -18,6 +18,7 @@
 // Thread-safe: one mutex guards everything, because the log thread and the
 // test thread both touch it.
 
+#include <condition_variable>
 #include <cstdint>
 #include <functional>
 #include <map>
@@ -25,6 +26,7 @@
 #include <mutex>
 #include <optional>
 #include <random>
+#include <set>
 #include <string>
 
 #include "common/fs.h"
@@ -58,6 +60,14 @@ class SimFs final : public FileSystem {
   Status rename(const std::string& from, const std::string& to) override;
   Status remove(const std::string& path) override;
   Status sync_dir(const std::string& dir) override;
+  Result<std::unique_ptr<DirLock>> lock_dir(const std::string& dir) override;
+  Result<uint64_t> available_bytes(const std::string& dir) override;
+
+  // --- a disk that stalls -----------------------------------------------------
+  // While syncs are held, every sync() blocks. Lets a test freeze the moment
+  // between "written" and "durable" and look at what the system does meanwhile.
+  void hold_syncs();
+  void release_syncs();
 
   // --- crash simulation -----------------------------------------------------
   // The file system as it might look after a crash right now. The image is
@@ -129,6 +139,11 @@ class SimFs final : public FileSystem {
   bool sync_broken_ = false;
   std::optional<uint64_t> append_failure_countdown_;
   std::optional<uint64_t> capacity_;
+
+  class Lock;
+  std::set<std::string> locked_dirs_;
+  bool syncs_held_ = false;
+  std::condition_variable sync_gate_;
 };
 
 }  // namespace baton

@@ -2,7 +2,9 @@
 
 #include <dirent.h>
 #include <fcntl.h>
+#include <sys/file.h>
 #include <sys/stat.h>
+#include <sys/statvfs.h>
 #include <unistd.h>
 
 #include <cerrno>
@@ -66,6 +68,16 @@ class PosixWritableFile final : public WritableFile {
   std::string path_;
   Fd fd_;
   uint64_t size_;
+};
+
+// flock() is released by the kernel when the descriptor closes, including when
+// the process dies, so a crashed server never leaves a stale lock behind.
+class PosixDirLock final : public DirLock {
+ public:
+  explicit PosixDirLock(Fd fd) : fd_(std::move(fd)) {}
+
+ private:
+  Fd fd_;
 };
 
 }  // namespace
@@ -176,6 +188,26 @@ Status PosixFs::sync_dir(const std::string& dir) {
   } while (rc != 0 && errno == EINTR);
   if (rc != 0) return io_error(std::format("fsync dir {}", dir), errno);
   return {};
+}
+
+Result<std::unique_ptr<DirLock>> PosixFs::lock_dir(const std::string& dir) {
+  const std::string path = join_path(dir, "LOCK");
+  Fd fd(::open(path.c_str(), O_RDWR | O_CREAT | O_CLOEXEC, 0644));
+  if (!fd.valid()) return io_error(std::format("open {}", path), errno);
+  if (::flock(fd.get(), LOCK_EX | LOCK_NB) != 0) {
+    if (errno == EWOULDBLOCK) {
+      return Error{ErrorCode::kFailedPrecondition,
+                   std::format("data directory {} is in use by another baton process", dir)};
+    }
+    return io_error(std::format("flock {}", path), errno);
+  }
+  return std::unique_ptr<DirLock>(std::make_unique<PosixDirLock>(std::move(fd)));
+}
+
+Result<uint64_t> PosixFs::available_bytes(const std::string& dir) {
+  struct statvfs info{};
+  if (::statvfs(dir.c_str(), &info) != 0) return io_error(std::format("statvfs {}", dir), errno);
+  return static_cast<uint64_t>(info.f_bavail) * static_cast<uint64_t>(info.f_frsize);
 }
 
 }  // namespace baton

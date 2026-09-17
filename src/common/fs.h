@@ -36,6 +36,15 @@ class WritableFile {
   virtual uint64_t size() const = 0;
 };
 
+// Held for as long as a process owns a data directory; released on destruction.
+class DirLock {
+ public:
+  DirLock() = default;
+  DirLock(const DirLock&) = delete;
+  DirLock& operator=(const DirLock&) = delete;
+  virtual ~DirLock() = default;
+};
+
 enum class OpenMode : uint8_t {
   kCreateNew,      // fail if the file already exists
   kAppendExisting  // fail if the file does not exist
@@ -70,6 +79,13 @@ class FileSystem {
 
   // Makes creations, renames and removals in `dir` durable.
   virtual Status sync_dir(const std::string& dir) = 0;
+
+  // Takes an exclusive, non-blocking lock on `dir` so that two servers can never
+  // write the same log. Fails with kFailedPrecondition if it is already held.
+  virtual Result<std::unique_ptr<DirLock>> lock_dir(const std::string& dir) = 0;
+
+  // Free space on the file system holding `dir`.
+  virtual Result<uint64_t> available_bytes(const std::string& dir) = 0;
 };
 
 // "dir/name", tolerating a trailing slash on dir.

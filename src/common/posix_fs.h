@@ -17,6 +17,8 @@ class PosixFs final : public FileSystem {
   Status rename(const std::string& from, const std::string& to) override;
   Status remove(const std::string& path) override;
   Status sync_dir(const std::string& dir) override;
+  Result<std::unique_ptr<DirLock>> lock_dir(const std::string& dir) override;
+  Result<uint64_t> available_bytes(const std::string& dir) override;
 };
 
 }  // namespace baton

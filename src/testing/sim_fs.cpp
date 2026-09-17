@@ -188,7 +188,8 @@ Status SimFs::handle_append(SimFile& file, std::string_view data) {
 }
 
 Status SimFs::handle_sync(SimFile& file) {
-  const std::scoped_lock lock(mutex_);
+  std::unique_lock lock(mutex_);
+  sync_gate_.wait(lock, [this] { return !syncs_held_; });
   if (sync_failure_countdown_ && --*sync_failure_countdown_ == 0) {
     sync_failure_countdown_.reset();
     sync_broken_ = true;
@@ -200,6 +201,50 @@ Status SimFs::handle_sync(SimFile& file) {
   file.synced = file.data.size();
   count_op_locked();
   return {};
+}
+
+void SimFs::hold_syncs() {
+  const std::scoped_lock lock(mutex_);
+  syncs_held_ = true;
+}
+
+void SimFs::release_syncs() {
+  {
+    const std::scoped_lock lock(mutex_);
+    syncs_held_ = false;
+  }
+  sync_gate_.notify_all();
+}
+
+class SimFs::Lock final : public DirLock {
+ public:
+  Lock(SimFs& fs, std::string dir) : fs_(fs), dir_(std::move(dir)) {}
+  ~Lock() override {
+    const std::scoped_lock lock(fs_.mutex_);
+    fs_.locked_dirs_.erase(dir_);
+  }
+  Lock(const Lock&) = delete;
+  Lock& operator=(const Lock&) = delete;
+
+ private:
+  SimFs& fs_;
+  std::string dir_;
+};
+
+Result<std::unique_ptr<DirLock>> SimFs::lock_dir(const std::string& dir) {
+  const std::scoped_lock lock(mutex_);
+  if (!locked_dirs_.insert(dir).second) {
+    return Error{ErrorCode::kFailedPrecondition,
+                 std::format("data directory {} is in use by another baton process", dir)};
+  }
+  return std::unique_ptr<DirLock>(std::make_unique<Lock>(*this, dir));
+}
+
+Result<uint64_t> SimFs::available_bytes(const std::string& /*dir*/) {
+  const std::scoped_lock lock(mutex_);
+  if (!capacity_) return uint64_t{1} << 40U;
+  const uint64_t used = used_bytes_locked();
+  return *capacity_ > used ? *capacity_ - used : 0;
 }
 
 // --- crash simulation ---------------------------------------------------------
