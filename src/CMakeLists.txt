@@ -11,3 +11,7 @@ configure_file(common/version.h.in "${PROJECT_BINARY_DIR}/generated/common/versi
 # common <- log, sched <- state <- snapshot <- server; net depends only on common.
 add_subdirectory(common)
 add_subdirectory(server)
+
+if(BATON_BUILD_TESTS OR BATON_BUILD_FUZZ)
+  add_subdirectory(testing)
+endif()
