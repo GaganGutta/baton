@@ -6,7 +6,13 @@
 
 #include <gtest/gtest.h>
 
+#include <atomic>
+#include <chrono>
+#include <memory>
+#include <set>
 #include <string>
+#include <thread>
+#include <vector>
 
 namespace baton {
 namespace {
@@ -110,6 +116,79 @@ TEST_F(SimFsTest, TornImagesKeepSyncedPrefixAndNeverGrow) {
   }
   EXPECT_TRUE(saw_partial);
   EXPECT_TRUE(saw_garbage);
+}
+
+// One fsync of the directory after several changes promises nothing about
+// which of them a crash in between keeps. Every combination must show up.
+TEST_F(SimFsTest, TornImagesKeepAnySubsetOfUnsyncedDirectoryChanges) {
+  fs_.write_file("d/one", "1");
+  fs_.write_file("d/two", "2");
+  fs_.write_file("d/old", "v");
+  ASSERT_TRUE(fs_.remove("d/one").ok());
+  ASSERT_TRUE(fs_.remove("d/two").ok());
+  ASSERT_TRUE(fs_.rename("d/old", "d/new").ok());
+
+  std::set<std::string> outcomes;
+  for (uint64_t seed = 0; seed < 200; ++seed) {
+    const auto image = fs_.crash_image(CrashMode::kTorn, seed);
+    ASSERT_NE(image->exists("d/old"), image->exists("d/new")) << "a rename is atomic";
+    outcomes.insert(std::string(image->exists("d/one") ? "1" : "-") +
+                    (image->exists("d/two") ? "2" : "-") + (image->exists("d/new") ? "N" : "O"));
+  }
+  EXPECT_EQ(outcomes.size(), 8U) << "2 unlinks and a rename: 8 possible directories";
+
+  ASSERT_TRUE(fs_.sync_dir("d").ok());
+  for (uint64_t seed = 0; seed < 20; ++seed) {
+    const auto image = fs_.crash_image(CrashMode::kTorn, seed);
+    EXPECT_EQ(image->list_dir("d").value(), std::vector<std::string>{"new"});
+  }
+}
+
+// Operations on the same name keep their order, whatever subset survives.
+TEST_F(SimFsTest, TornDirectoryChangesAreAppliedInOrder) {
+  fs_.write_file("d/a", "first");
+  ASSERT_TRUE(fs_.remove("d/a").ok());
+  auto second = create("d/a");
+  ASSERT_TRUE(second->append("second").ok());
+  ASSERT_TRUE(second->sync().ok());
+
+  for (uint64_t seed = 0; seed < 100; ++seed) {
+    const auto image = fs_.crash_image(CrashMode::kTorn, seed);
+    if (!image->exists("d/a")) continue;
+    const std::string data = image->read_file("d/a").value();
+    EXPECT_TRUE(data == "first" || data == "second") << data;
+  }
+}
+
+TEST_F(SimFsTest, ReadsStreamInPieces) {
+  fs_.write_file("d/a", "0123456789");
+  auto file = fs_.open_read("d/a");
+  ASSERT_TRUE(file.ok());
+  std::string out = "kept:";
+  EXPECT_EQ((*file)->read(4, out).value(), 4U);
+  EXPECT_EQ((*file)->read(100, out).value(), 6U);
+  EXPECT_EQ((*file)->read(100, out).value(), 0U) << "end of file";
+  EXPECT_EQ(out, "kept:0123456789") << "read() appends";
+  EXPECT_FALSE(fs_.open_read("d/missing").ok());
+}
+
+TEST_F(SimFsTest, HeldSyncsBlockOnlyMatchingFiles) {
+  auto log = create("d/wal-1");
+  auto other = create("d/snapshot-1");
+  fs_.hold_syncs("wal-");
+  ASSERT_TRUE(other->append("x").ok());
+  ASSERT_TRUE(other->sync().ok()) << "not held: returns at once";
+
+  std::atomic<bool> synced{false};
+  std::thread blocked([&] {
+    EXPECT_TRUE(log->sync().ok());
+    synced = true;
+  });
+  std::this_thread::sleep_for(std::chrono::milliseconds(50));
+  EXPECT_FALSE(synced.load());
+  fs_.release_syncs();
+  blocked.join();
+  EXPECT_TRUE(synced.load());
 }
 
 TEST_F(SimFsTest, ImagesAreIndependentOfTheOriginal) {
