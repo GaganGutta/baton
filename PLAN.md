@@ -110,13 +110,13 @@ Conventions used below:
 - [x] Update docs; CI green; push.
 
 ### M6. Python SDK
-- [ ] `sdk/python/pyproject.toml` (installable with `pip install "git+https://github.com/GaganGutta/baton#subdirectory=sdk/python"`), package `baton`.
-- [ ] `baton.resp`: minimal RESP2 codec + connection (timeouts, reconnect).
-- [ ] `baton.Client`: enqueue, reserve, heartbeat, ack, fail, cancel, status, stats, dlq_*; typed results and exceptions mapped from error prefixes.
-- [ ] `baton.Worker`: `@worker.task("name")` decorator, JSON envelope convention `{task, args, kwargs}`, configurable concurrency (threads), background heartbeats, graceful SIGTERM shutdown (stop reserving, finish in-flight, bounded wait), retry-on-exception via FAIL.
-- [ ] `baton.idempotent`: helper that makes a side effect happen once across duplicate deliveries (pluggable store; file-backed fsynced store included; documented contract).
-- [ ] Tests (pytest) against a real server binary: end-to-end enqueue→work→ack, heartbeat keeps long jobs alive, SIGTERM drains, worker kill → job re-delivered, idempotent helper under duplicate delivery.
-- [ ] CI job for SDK tests; docs; push.
+- [x] `sdk/python/pyproject.toml` (installable with `pip install "git+https://github.com/GaganGutta/baton#subdirectory=sdk/python"`), package `baton`.
+- [x] `baton.resp`: minimal RESP2 codec + connection (timeouts, reconnect).
+- [x] `baton.Client`: enqueue, reserve, heartbeat, ack, fail, cancel, status, stats, dlq_*; typed results and exceptions mapped from error prefixes.
+- [x] `baton.Worker`: `@worker.task("name")` decorator, JSON envelope convention `{task, args, kwargs}`, configurable concurrency (threads), background heartbeats, graceful SIGTERM shutdown (stop reserving, finish in-flight, bounded wait), retry-on-exception via FAIL.
+- [x] `baton.idempotent`: helper that makes a side effect happen once across duplicate deliveries (file-backed, fsynced, multi-process `Ledger` with fencing tokens; documented contract). The planned pluggable-store interface was dropped: what makes an effect exactly-once is that it commits atomically *with* its record, which differs per store, and an interface would hide exactly that (design.md 9.4).
+- [x] Tests (pytest) against a real server binary: end-to-end enqueue→work→ack, heartbeat keeps long jobs alive, SIGTERM drains, worker kill → job re-delivered, idempotent helper under duplicate delivery.
+- [x] CI job for SDK tests; docs; push.
 
 ### M7. Chaos harness
 - [ ] Design section + `docs/testing.md`: harness architecture, seeds, invariants, fault model, how to reproduce a failure from a seed.

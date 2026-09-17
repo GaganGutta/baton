@@ -93,6 +93,29 @@ in-process server over loopback on `SimFs`; integration tests are in
 | W10 | **A stalled disk slows clients down instead of growing memory**: reads pause when the log backlog passes its bound and resume when it drains; nothing is lost or deadlocked. | `ServerBackpressureTest.StalledDiskPausesReadsAndEverythingCompletesAfterwards` |
 | W11 | **Graceful shutdown** (SIGTERM) flushes and syncs the log, sends every reply that was waiting on it, answers parked `RESERVE`s with nil, and exits 0. | `ServerTest.ShutdownAnswersParkedReservesAndFlushesAcknowledgements`, `test_crash_recovery.py::test_sigterm_is_a_clean_shutdown` |
 
+## Python SDK
+
+What the SDK adds on the client's side of the socket. Tests live in
+`sdk/python/tests/` and run against the real server binary.
+
+| # | Promise | Checked by |
+|---|---|---|
+| P1 | **A keyed enqueue is exactly one job, even if the reply is lost.** The SDK resends it on a new connection and gets the first attempt's job id. | `test_client.py::test_keyed_enqueue_is_retried_and_does_not_duplicate` (a proxy drops the reply after the server has executed the request) |
+| P2 | **An unkeyed enqueue is never silently duplicated.** If the connection dies after the request was sent, `EnqueueUncertain` is raised instead of retrying. | `test_client.py::test_unkeyed_enqueue_refuses_to_guess` |
+| P3 | **An `ACK` whose reply was lost still counts**, and a genuinely stale `ACK` still raises. | `test_client.py::test_ack_whose_reply_was_lost_still_counts`, `::test_stale_ack_after_a_resend_is_still_stale_if_the_job_did_not_succeed` |
+| P4 | **A killed worker loses nothing**: its job is delivered again once the lease expires, and completes. A restarted *server* does not take the worker down either. | `test_worker.py::test_a_killed_worker_loses_nothing` (SIGKILL mid-job), `::test_survives_a_server_restart` |
+| P5 | **Heartbeats keep a long job alive**: a handler that runs for several lease periods is delivered once. | `test_worker.py::test_heartbeats_keep_a_long_job_alive` |
+| P6 | **A lost lease is noticed and its result discarded**: after a cancellation the handler sees `lease_lost`, and the worker does not acknowledge over it. | `test_worker.py::test_a_cancelled_job_loses_its_lease_and_is_not_acked` |
+| P7 | **Graceful shutdown**: on SIGTERM the running handler finishes and is acknowledged, no new job is taken, and the process exits 0. | `test_worker.py::test_sigterm_lets_the_running_job_finish_and_exits_zero` (a real process and signal), `::test_graceful_stop_finishes_the_running_job_and_takes_no_new_one` |
+| P8 | **Handler outcomes map to the protocol**: return → `ACK`; exception → `FAIL` with backoff until dead-lettered; `Retry` chooses the delay; `Fatal` and unparseable payloads dead-letter at once; an unknown task is retried, not dead-lettered. | `test_worker.py::test_exceptions_retry_then_dead_letter`, `::test_retry_fatal_and_unknown_tasks` |
+| P9 | **`Ledger.put_if_absent` happens once per key**: among racing processes exactly one wins each key; nothing reported as recorded is lost to SIGKILL; a torn tail is repaired; damage elsewhere is refused, not truncated away. | `test_idempotent.py::test_processes_racing_for_the_same_keys_each_win_a_key_exactly_once`, `::test_a_killed_writer_loses_nothing_it_reported`, `::test_a_torn_tail_is_repaired`, `::test_damage_in_the_middle_is_not_repaired_silently` |
+| P10 | **A duplicate delivery does not duplicate a ledger effect.** A worker that dies after its side effect and before the `ACK` causes a second run; the effect recorded through the ledger exists once. | `test_worker.py::test_a_duplicate_delivery_does_not_duplicate_a_ledger_effect` |
+
+Not promised: exactly-once for effects outside a ledger. `Ledger.once()` is "at
+least once, and never again once recorded", and says so
+(`test_idempotent.py::test_two_live_runs_both_happen_and_the_first_result_wins`
+pins the window down).
+
 ## Workflows
 
 | # | Promise | Checked by |

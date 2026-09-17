@@ -6,9 +6,9 @@ from here with no other context. Read `PLAN.md` for the task breakdown and
 
 ## Status
 
-- **Current milestone:** M6 (Python SDK) — next
-- **Last completed task:** M5: copy-then-write snapshots (chosen over fork COW and incremental, design.md 8.1), chunked snapshot files, two retained snapshots, compaction governed by the older one, `recover_state()`, background `Snapshotter`, `SNAPSHOT` command and `--snapshot-every`, `fuzz_snapshot_load`, 7 new mutants, `bench/storage_bench` with results in `docs/benchmarks.md`
-- **Next task:** M6 design section, then `sdk/python`: own RESP client, `Client`, `Worker` with task decorator, heartbeats, graceful SIGTERM, idempotency helper, pytest suite against the real binary, CI job
+- **Current milestone:** M7 (chaos harness) — next
+- **Last completed task:** M6: `sdk/python` — own RESP2 client, `Client` with a duplicate-safe retry policy (`EnqueueUncertain`), threaded `Worker` with automatic heartbeats, lost-lease detection and graceful SIGTERM, `baton.idempotent.Ledger`; 51 pytest tests against the real binary; CI job on Python 3.9 and 3.13
+- **Next task:** M7 design section, then `chaos/`: seeded orchestrator that SIGKILLs server and workers, producer journal, ledger-backed side effects, the five invariant checks, fault injection (disk full, fsync failure, slow disk, clock jumps, connection drops), short CI run + long local run
 
 ## Milestones
 
@@ -20,7 +20,7 @@ from here with no other context. Read `PLAN.md` for the task breakdown and
 | M3 Networking | **done** | 262 unit tests + 50 integration tests (real binary, redis-cli, redis-py under default/RESP2/RESP3, SIGKILL mid-pipeline); 16/16 mutants killed; 6 fuzz targets; guarantees W1–W11 |
 | M4 Leases/retries/DLQ | **done** | 279 unit + 54 integration tests; 20/20 mutants killed; guarantees L11–L13. Decisions: leases survive restarts with `--lease-grace` (5 s); a wall-clock step > 1 s is handled exactly like a restart |
 | M5 Snapshots | **done** | 325 unit + 57 integration tests; 27/27 mutants killed; 7 fuzz targets; guarantees S1–S7. SimFs torn crashes now keep an arbitrary subset of unsynced directory operations, which found a real recovery bug (leftover segments behind the snapshot, design.md 8.4). Measured: pause 0.15 ms / 3.5 ms / 126 ms at 10k / 100k / 1M live jobs |
-| M6 Python SDK | not started | |
+| M6 Python SDK | **done** | 51 tests (`sdk/python/tests`, real binary): replies lost in transit via a dropping proxy, SIGKILLed and SIGTERMed worker processes, server restart under a running worker, racing and killed ledger writers; guarantees P1–P10. Run: `BATON_BIN=build/release/src/server/baton ~/baton-venv/bin/python -m pytest sdk/python/tests -q` |
 | M7 Chaos harness | not started | |
 | M8 Benchmarks + v0.1.0 | not started | |
 | M9 Workflows | not started | |
