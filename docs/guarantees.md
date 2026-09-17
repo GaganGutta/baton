@@ -51,6 +51,26 @@ for restarts and clock jumps. Tests live in `tests/unit/state/`.
 | L9 | **Limits are errors, not degradation.** An oversized payload or a full `max-memory` budget is refused with a clear error and logs nothing; enqueue works again once memory is freed. | `EngineTest.EnqueueRejectsBadInputWithoutLoggingAnything`, `EngineMemoryLimitTest.EnqueueFailsClearlyAtTheLimitAndRecoversWhenMemoryIsFreed` |
 | L10 | **Structural invariants** hold after every operation: each job is in exactly the index its state implies, counts match a recount, the heap property holds, a timer exists exactly when one is needed, the memory estimate equals a recomputation. | `State::check_invariants()` after every step of `StateModelTest` and after every `EngineTest` |
 
+## At the wire
+
+Promises of the server (M3). Unit tests are in `tests/unit/server/` and run an
+in-process server over loopback on `SimFs`; integration tests are in
+`tests/integration/` and run the real binary on a real file system.
+
+| # | Promise | Checked by |
+|---|---|---|
+| W1 | **No reply before its records are durable.** With fsync frozen, a client that enqueues, reserves or reads receives *no bytes at all*; a power-loss image taken at that moment contains none of the unacknowledged work; when fsync completes the replies arrive, in pipeline order. This covers reads too: `STATUS` cannot reveal a job that a crash could still take back. | `ServerTest.NoReplyBeforeItsRecordsAreDurable`; mutant "replies sent before their records are durable" |
+| W2 | **Everything a client was told survives.** After a power-loss image (unit) or `SIGKILL` (integration), every job whose id was returned exists, acknowledged jobs stay succeeded, idempotency keys still deduplicate, and job ids are never reused. | `ServerTest.EverythingAcknowledgedSurvivesPowerLoss`, `test_crash_recovery.py::test_acknowledged_work_survives_sigkill`, `::test_sigkill_in_the_middle_of_a_pipeline` (5 seeds × 4 kills mid-pipeline) |
+| W3 | **The server restarts by itself after a crash**, repairing a torn log tail on a real file system, and **refuses to start** on a log with mid-log damage or one whose records do not fit the state machine, without modifying it. | `test_crash_recovery.py::test_torn_tail_is_repaired_on_a_real_file_system`, `::test_mid_log_damage_makes_the_server_refuse_to_start`, `ServerStartupTest.RefusesToStartOnADamagedLog`, `.RefusesALogThatDoesNotFitTheStateMachine` |
+| W4 | **Stock Redis clients work unmodified**: redis-cli, and redis-py with its default settings, with RESP2 and with RESP3. | `tests/integration/test_redis_py.py` (every test × 3 protocol settings), `test_redis_cli.py`, `ServerTest.Resp3IsNegotiatedPerConnection` |
+| W5 | **Blocking `RESERVE`** wakes as soon as a job becomes ready (new, delayed or retried), serves parked connections first come first served, times out with nil, keeps pipelined requests behind it in order, and never leases a job to a parked connection that has disconnected. | `ServerTest.BlockingReserve*`, `.ParkedWorkersAreServedFirstComeFirstServed`, `.RequestsPipelinedBehindAParkedReserveRunAfterIt`, `.DisconnectedWaiterDoesNotSwallowAJob`; mutant "parked RESERVEs served newest first" |
+| W6 | **Limits answer with `-LIMIT` and change nothing**: a payload over `--max-payload` (skipped as it streams in, never buffered; the connection stays usable), `--max-memory`, `--max-connections`. A client that never reads its replies is disconnected instead of growing the server's memory. | `ServerLimitsTest.*`, `RespParserTest.OversizedArgumentIsSkippedWithoutBuffering`; fuzz target `fuzz_resp_parser` (bounded buffering on every input) |
+| W7 | **Hostile bytes cannot hurt.** Malformed frames, inline commands and HTTP requests get an error and a closed connection; other connections are unaffected. Any chunking of a byte stream parses to the same requests. | `ServerTest.ProtocolErrorsGetAnErrorReplyAndAClosedConnection`, `RespParserTest.*`; `fuzz_resp_parser` |
+| W8 | **Authentication**: with `--requirepass`, nothing but `AUTH`, `HELLO` and `QUIT` works before the right password is given. | `ServerAuthTest.EverythingNeedsAuthUntilThePasswordIsGiven`, `test_redis_py.py::test_auth`; mutant "commands allowed without AUTH" |
+| W9 | **One server per data directory.** A second instance fails fast and leaves the first untouched. | `ServerTest.SecondServerOnTheSameDirectoryIsRefused`, `test_crash_recovery.py::test_second_instance_on_the_same_directory_is_refused` |
+| W10 | **A stalled disk slows clients down instead of growing memory**: reads pause when the log backlog passes its bound and resume when it drains; nothing is lost or deadlocked. | `ServerBackpressureTest.StalledDiskPausesReadsAndEverythingCompletesAfterwards` |
+| W11 | **Graceful shutdown** (SIGTERM) flushes and syncs the log, sends every reply that was waiting on it, answers parked `RESERVE`s with nil, and exits 0. | `ServerTest.ShutdownAnswersParkedReservesAndFlushesAcknowledgements`, `test_crash_recovery.py::test_sigterm_is_a_clean_shutdown` |
+
 ## Workflows
 
 | # | Promise | Checked by |

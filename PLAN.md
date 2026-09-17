@@ -69,20 +69,21 @@ Conventions used below:
 - [x] Tests: per-transition unit tests; timing wheel vs. a naive reference model (randomized); **model-based test**: random command sequences, after every step check invariants; **replay equivalence**: canonical dump of live state == state rebuilt by replaying the records.
 - [x] Microbenchmarks wired up (timing wheel, heap) — numbers reported in M8.
 - [x] `state/engine`: command logic (validate → resolve nondeterminism → apply → log) behind a `RecordSink`; fuzz targets `fuzz_record_decode`, `fuzz_state_apply`, `fuzz_state_deserialize`; 7 state-machine mutants added to `scripts/mutation-check.sh`.
-- [ ] Update docs; CI green; push.
+- [x] Update docs; CI green; push.
 
 ### M3. Networking
-- [ ] **Write `docs/protocol.md` first**: framing, every command's syntax/replies/errors, error-code prefixes (`ERR`, `NOAUTH`, `NOTFOUND`, `STALE`, `STATE`, `LIMIT`, `BADARG`), pipelining and ordering rules, limits.
-- [ ] Design section: event loop, connection lifecycle, reply gating, blocking RESERVE, backpressure, limits.
-- [ ] `net/poller`: epoll (Linux) and kqueue (macOS) behind one interface; self-pipe wakeup.
-- [ ] `net/resp`: incremental zero-copy RESP2 request parser with hard limits (array length, bulk length, total request size); reply writer.
-- [ ] Fuzz target: RESP parser (incl. split-at-every-offset equivalence check); corpus seeds.
-- [ ] `net/connection`: non-blocking read/write buffers, ordered reply queue of `(bytes, required_lsn)`, output-buffer limit, max connections.
-- [ ] `server/`: wiring of loop + log thread + state; command table; handlers for PING, INFO, AUTH, ENQUEUE, RESERVE (blocking, multi-queue, timeout via timing wheel, fair waiter wakeup), HEARTBEAT, ACK, FAIL, CANCEL, STATUS, STATS; client-compat stubs (HELLO, CLIENT, COMMAND, SELECT, QUIT).
-- [ ] Recovery on startup (replay log → state), graceful shutdown on SIGTERM/SIGINT.
-- [ ] Config/flags: dir, bind (default 127.0.0.1), port, fsync policy, requirepass, limits.
-- [ ] Tests: parser unit tests; handler tests against an in-process server with a **controllable log** proving the reply-after-durable invariant (hold the fsync → no reply bytes; release → replies, in pipeline order); limits return clear errors; AUTH; blocking RESERVE semantics (timeout, multi-queue order, waiter fairness, disconnect while blocked).
-- [ ] Integration tests (pytest): redis-cli and redis-py against the real binary; kill -9 + restart keeps acknowledged jobs.
+- [x] **Write `docs/protocol.md` first**: framing, every command's syntax/replies/errors, error-code prefixes (`ERR`, `NOAUTH`, `NOTFOUND`, `STALE`, `STATE`, `LIMIT`, `BADARG`), pipelining and ordering rules, limits.
+- [x] Design section: event loop, connection lifecycle, reply gating, blocking RESERVE, backpressure, limits.
+- [x] `net/poller`: epoll (Linux) and kqueue (macOS) behind one interface; self-pipe wakeup.
+- [x] `net/resp`: incremental zero-copy RESP2 request parser with hard limits (array length, bulk length, total request size); reply writer.
+- [x] Fuzz target: RESP parser (incl. split-at-every-offset equivalence check); corpus seeds.
+- [x] `net/connection`: non-blocking read/write buffers, ordered reply queue of `(bytes, required_lsn)`, output-buffer limit, max connections.
+- [x] `server/`: wiring of loop + log thread + state; command table; handlers for PING, INFO, AUTH, ENQUEUE, RESERVE (blocking, multi-queue, timeout via timing wheel, fair waiter wakeup), HEARTBEAT, ACK, FAIL, CANCEL, STATUS, STATS; client-compat stubs (HELLO, CLIENT, COMMAND, SELECT, QUIT).
+- [x] Recovery on startup (replay log → state), graceful shutdown on SIGTERM/SIGINT.
+- [x] Config/flags: dir, bind (default 127.0.0.1), port, fsync policy, requirepass, limits.
+- [x] Tests: parser unit tests; handler tests against an in-process server with a **controllable log** proving the reply-after-durable invariant (hold the fsync → no reply bytes; release → replies, in pipeline order); limits return clear errors; AUTH; blocking RESERVE semantics (timeout, multi-queue order, waiter fairness, disconnect while blocked).
+- [x] Integration tests (pytest): redis-cli and redis-py against the real binary; kill -9 + restart keeps acknowledged jobs.
+- [x] RESP3 negotiation (`HELLO 3`): not planned, but required — redis-py 8 defaults to it and treats a refusal as fatal (found by the integration tests).
 - [ ] Update docs; CI green; push.
 
 ### M4. Leases, retries, delayed jobs, DLQ

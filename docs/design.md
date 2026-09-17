@@ -13,6 +13,7 @@ Contents:
 3. [M0 — Foundations](#3-m0--foundations)
 4. [M1 — The durable log](#4-m1--the-durable-log)
 5. [M2 — The state machine](#5-m2--the-state-machine)
+6. [M3 — Networking](#6-m3--networking)
 
 ---
 
@@ -680,6 +681,173 @@ jobs. One rebuild path serves restart and clock jumps alike.
   correctness: the drawn value is logged, never re-drawn.
 - `DeadJobRetried` and `JobsPurged` are applied and tested here; the commands
   that produce them (`DLQ.RETRY`, `DLQ.PURGE`) arrive with M4.
+
+## 6. M3 — Networking
+
+The wire contract is `docs/protocol.md`, written first. This section is about
+how the server honours it: one event loop, a parser that survives hostile
+input, and the mechanism behind "no reply before its records are durable".
+
+### 6.1 One loop iteration
+
+```
+wait for events (epoll/kqueue), at most until the next timer deadline
+ 1. engine.tick()            sample clocks; promote due jobs; expire leases (records)
+ 2. accept new connections
+ 3. for each readable connection: read → parse → execute commands
+                                  (each reply is queued with the LSN it depends on)
+ 4. serve blocked RESERVEs for queues that gained ready jobs; time out the rest
+ 5. log.flush()              hand this iteration's records to the log thread: ONE batch
+ 6. release replies whose LSN <= log.committed_lsn(); write to sockets
+```
+
+Everything a loop iteration logs goes to the log thread as one batch, however
+many connections contributed to it; that is where group commit comes from. The
+log thread's commit callback writes a byte to a self-pipe, which wakes the loop
+to run step 6 for the replies that were waiting.
+
+### 6.2 Reply gating: the core invariant, mechanically
+
+Each connection has a FIFO of `(reply bytes, required LSN)`. `required LSN` is
+`engine.last_lsn()` at the moment the reply is produced — the LSN of the last
+record appended by *anyone* so far. Because the log becomes durable strictly in
+LSN order, "LSN n is durable" implies every record the reply could depend on
+is durable: its own, and every earlier one that shaped the state it reports.
+
+- A mutating command's reply waits for its own record.
+- A read-only command's reply waits for whatever was logged before it, so
+  `STATUS` cannot reveal a job whose `ENQUEUE` has not reached the disk.
+- When nothing is in flight, `required LSN <= committed LSN` already holds and
+  the reply goes out in the same iteration: reads are not slowed down by
+  durability unless they race with writes.
+- A reply is only ever released from the *front* of its connection's FIFO, so
+  pipelined replies cannot overtake each other.
+
+The server keeps one global deque of `(LSN, connection)` in LSN order; when the
+committed LSN advances it pops the front while `LSN <= committed`. The cost of
+releasing replies is proportional to the replies released, not to the number of
+connections.
+
+### 6.3 The RESP2 request parser
+
+Incremental, zero-copy and bounded:
+
+- It consumes bytes from the connection's read buffer and yields a request as a
+  vector of `string_view`s into that buffer; nothing is copied until a handler
+  decides to keep a payload.
+- It can be fed one byte at a time and produces the same requests as when fed
+  everything at once (the fuzz target checks this equivalence at every split).
+- **Every length is validated before it is used**: argument count ≤ 1,024, bulk
+  length ≤ 512 MiB, and no allocation is ever sized by an unvalidated number.
+- An argument larger than `--max-payload` is **skipped as it streams in** rather
+  than buffered: the request is then answered with `-LIMIT`, and the connection
+  stays in sync. Without this, a too-large payload would either have to be
+  buffered in full (a memory DoS) or cost the client its connection.
+- Anything that is not an array of bulk strings is a protocol error: reply and
+  close. Inline commands are rejected on purpose (see protocol.md).
+
+### 6.4 Blocking RESERVE
+
+A `RESERVE` that finds nothing parks the connection: it is appended to the
+waiter list of every queue it named and gets a timeout timer (a second timing
+wheel owned by the server; the state machine's wheel stays free of connection
+concerns). While parked, the connection's later pipelined requests stay in its
+read buffer, unparsed.
+
+When `State` reports that a queue gained a ready job, the loop wakes that
+queue's waiters in arrival order; each re-runs its `RESERVE` over its own queue
+list. A waiter that gets a job, times out or disconnects is removed from all
+its lists. Fairness is first come, first served per queue.
+
+### 6.5 Backpressure and limits
+
+- **Slow disk:** when the log's uncommitted backlog exceeds 64 MiB the loop stops
+  reading from client sockets until it drains; TCP pushes back on producers.
+- **Slow reader:** a connection whose unsent replies exceed 64 MiB is closed.
+- **Too many connections:** the new socket gets `-LIMIT` and is closed.
+- **Memory / payload:** `-LIMIT` from the engine (M2) or the parser (6.3).
+- **Disk nearly full:** free space is checked (statvfs) every second; below a
+  reserve of twice the segment size, `ENQUEUE` answers `-LIMIT` while `ACK`,
+  `FAIL` and reads keep working so the backlog can drain. If the disk fills
+  anyway, the log aborts (4.3) and recovery takes over.
+
+### 6.6 Startup, shutdown, single instance
+
+Startup: lock the data directory (`flock` on `LOCK`; a second instance fails
+fast), recover the log, replay it into `State`, `end_replay()`, open the
+`LogWriter`, listen. Shutdown on SIGTERM/SIGINT: stop accepting and reading,
+answer parked `RESERVE`s with the null array, flush and fsync the log, release
+the replies that were waiting on it, close. A signal handler only sets a flag
+and writes to the self-pipe.
+
+### 6.7 Security posture
+
+Binds to `127.0.0.1` unless told otherwise. Optional `--requirepass`, compared
+in constant time. No TLS (non-goal). The parser refuses inline commands, so
+cross-protocol requests from browsers cannot execute anything.
+
+### 6.8 Test plan
+
+- Parser: unit tests for every frame shape and every limit; oversize skipping;
+  fuzz target with the split-anywhere equivalence oracle.
+- **Reply-after-durable, end to end:** an in-process server on loopback over a
+  `SimFs` whose `sync()` can be held. While it is held, clients that enqueue,
+  reserve or read must receive *no bytes*; when it is released, the replies
+  arrive, in pipeline order. A mutant that releases replies early must fail it.
+- Blocking `RESERVE`: timeout, wake on enqueue, wake on delayed job and on
+  retry, multi-queue order, FIFO fairness, disconnect while parked, pipelining
+  behind a parked `RESERVE`.
+- Limits and auth: every row of the limits table in protocol.md.
+- Integration (pytest, real binary): redis-cli and redis-py sessions; `kill -9`
+  at arbitrary points followed by restart keeps every acknowledged job.
+
+### 6.9 Alternatives considered
+
+- **Thread per connection / a thread pool.** Would need locking around all
+  state, the opposite of the design's core simplification. One loop handles far
+  more requests than the disk can make durable anyway.
+- **io_uring.** Faster than epoll for many small operations, but Linux-only and
+  the bottleneck is fsync, not syscalls.
+- **Gating only mutating replies.** Simpler, but a read could then reveal state
+  that a crash takes back, which is exactly what the invariant forbids.
+- **Inline commands** for telnet-friendliness: rejected for the cross-protocol
+  reason above; `redis-cli` and `batonctl` cover manual use.
+
+### 6.10 What building it changed, and known limitations
+
+- **RESP3 had to be added.** The plan said RESP2 only. The first integration
+  test against redis-py 8 failed: it opens every connection with `HELLO 3` by
+  default and treats `-NOPROTO` as fatal, so the most popular Python client
+  could not connect out of the box. Telling users to pass `protocol=2` would
+  have hollowed out "any Redis client library can connect", so baton
+  negotiates RESP3 per connection. The cost was small because every reply type
+  baton uses is valid RESP3 already; only "nothing" (`_` instead of `*-1`) and
+  field–value replies (maps instead of flat arrays) differ. The integration
+  suite runs every test under redis-py's defaults, RESP2 and RESP3.
+- **Everything is gated, even `PING`.** The rule is uniform — a reply waits for
+  the last LSN logged before it — rather than per command. During an fsync
+  stall a health check stalls too, which is an honest answer: the server cannot
+  acknowledge anything at that moment. A per-command exemption list would be
+  one more thing to get wrong.
+- **A lease can be granted to a connection that is already gone.** If a client
+  disconnects after its `RESERVE` was executed but before the reply could be
+  written, the lease record is durable and the job waits out its lease before
+  it is retried. Correct (at-least-once), just slow for that one job; releasing
+  such leases early is on the roadmap. A parked `RESERVE` whose client
+  disconnects is cleaned up immediately and never leases anything
+  (`ServerTest.DisconnectedWaiterDoesNotSwallowAJob`).
+- **Input is parsed from a contiguous buffer.** A request that arrives in many
+  small reads is re-examined from its first byte on each read; the work is
+  bounded by the argument count (≤ 1,024), not by the bytes, because the
+  declared lengths let the parser skip. Consumed input is compacted lazily.
+- **One `write()` per connection per loop iteration**, not per reply: replies
+  accumulate in the connection's output buffer and are flushed once.
+- **Backpressure is coarse:** when the log backlog exceeds 64 MiB all client
+  reads pause, not just those of the heaviest producer.
+- **The disk-space check is a poll** (once per second, `statvfs`). A disk that
+  fills faster than that still ends in the abort-and-recover path of 4.3.
+- **Host names are not resolved for `--bind`**, only address literals, so what
+  baton listens on never depends on DNS.
 
 ---
 

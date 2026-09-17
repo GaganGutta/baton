@@ -11,7 +11,12 @@ down here instead of being built, so the core stays small and provable.
 
 ## Ideas for later
 
-- **RESP3** support (`HELLO 3`), so clients get maps instead of flat arrays.
+- **More of RESP3.** `HELLO 3`, maps and the RESP3 null are supported (M3,
+  because redis-py 8 requires them); push messages, e.g. to tell a worker that
+  its job was cancelled without waiting for the next heartbeat, are not.
+- **Release a lease whose RESERVE reply could not be delivered.** Today a job
+  leased to a connection that died before reading the reply waits out its
+  lease.
 - **Time zones for cron schedules.** Schedules are UTC-only in the plan.
 - **Windows-native build.** WSL2 and Docker cover Windows users today.
 - **Per-job result retention policies** beyond a single server-wide setting.

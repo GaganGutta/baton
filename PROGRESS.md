@@ -6,9 +6,9 @@ from here with no other context. Read `PLAN.md` for the task breakdown and
 
 ## Status
 
-- **Current milestone:** M3 (networking) — next
-- **Last completed task:** M2 state machine: timing wheel, jobs/queues/idempotency, records, `State::apply`, `Engine`, model-based tests, fuzzers, mutants, docs
-- **Next task:** write `docs/protocol.md`, then the M3 design section, then poller → RESP parser (+ fuzz) → connection/reply gating → server wiring
+- **Current milestone:** M4 (leases, retries, delayed jobs, DLQ) — next
+- **Last completed task:** M3 networking: poller, RESP parser, server (reply gating, blocking RESERVE, limits, AUTH), integration tests with redis-cli/redis-py incl. kill -9, RESP3 negotiation
+- **Next task:** M4 design section, then DLQ.LIST / DLQ.RETRY / DLQ.PURGE, the wall-clock jump detector, restart lease grace tests through the wire
 
 ## Milestones
 
@@ -17,7 +17,7 @@ from here with no other context. Read `PLAN.md` for the task breakdown and
 | M0 Scaffold | **done** | CI: gcc-14 + clang-18 (release, asan), tsan, tidy (LLVM 21), macOS, Docker |
 | M1 Durable log | **done** | 140 tests under ASan+UBSan and TSan; 6/6 mutants killed; 2 fuzz targets; guarantees D1–D9 |
 | M2 State machine | **done** | 210 tests; model-based test with replay equivalence; 13/13 mutants killed; 5 fuzz targets; guarantees L1–L10. Layers: `Engine` (commands, only reader of clock/RNG) → `State::apply(record)` → `RecordSink` |
-| M3 Networking | not started | |
+| M3 Networking | **done** | 262 unit tests + 50 integration tests (real binary, redis-cli, redis-py under default/RESP2/RESP3, SIGKILL mid-pipeline); 16/16 mutants killed; 6 fuzz targets; guarantees W1–W11 |
 | M4 Leases/retries/DLQ | not started | |
 | M5 Snapshots | not started | |
 | M6 Python SDK | not started | |
@@ -45,6 +45,10 @@ from here with no other context. Read `PLAN.md` for the task breakdown and
   so no private email address lands in a public repo.
 - Docker Desktop is installed but was not running at project start; it is needed
   for the Dockerfile check (M0) and the Beanstalkd/Faktory comparison (M8).
+- Python for integration tests, the SDK and chaos: a venv at `~/baton-venv` in WSL
+  with `pytest` and `redis` (`python3 -m venv ~/baton-venv && ~/baton-venv/bin/pip
+  install pytest redis`). Run: `BATON_BIN=build/release/src/server/baton
+  ~/baton-venv/bin/python -m pytest tests/integration -q`.
 
 ## How to verify the current state
 

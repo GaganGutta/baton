@@ -1,8 +1,9 @@
 # Protocol
 
-baton speaks **RESP2**, the Redis serialization protocol, over TCP, with its own
-command set. Any Redis client library that can send an arbitrary command can
-talk to baton:
+baton speaks **RESP**, the Redis serialization protocol, over TCP, with its own
+command set: RESP2 by default, RESP3 for connections that ask for it with
+`HELLO 3`. Any Redis client library that can send an arbitrary command can talk
+to baton:
 
 ```python
 import redis
@@ -58,6 +59,15 @@ A request is a RESP array of bulk strings, exactly what Redis clients send:
 baton uses the five RESP2 reply types: simple string (`+OK`), error, integer,
 bulk string, array. "Nothing" is the null array `*-1` (what `RESERVE` returns
 on timeout; clients surface it as `nil`/`None`).
+
+**RESP3.** A connection that sends `HELLO 3` gets exactly two differences:
+"nothing" is the RESP3 null `_`, and replies documented as *field–value pairs*
+(`HELLO`, `STATUS`, `STATS`, the entries of `DLQ.LIST`) are RESP3 maps instead
+of flat arrays, so client libraries hand back a dictionary. Requests are the
+same in both versions. RESP3 exists in baton for one reason: some clients —
+redis-py 8 among them — open every connection with `HELLO 3` by default and
+treat a refusal as fatal. baton does not use RESP3 push messages, doubles,
+booleans or attributes.
 
 Errors are `-<CODE> <human readable message>`. Clients should branch on the
 code, never on the message:
@@ -202,12 +212,14 @@ Errors: `ERR`, `NOTFOUND`, `STALE`.
 ### FAIL
 
 ```
-FAIL <job_id> <token> [<error>] [RETRYIN <ms> | NORETRY]
+FAIL <job_id> <token> [<error> [RETRYIN <ms> | NORETRY]]
 ```
 
 Reports a failed attempt. The job is retried after a backoff, or moved to the
 dead-letter queue if this was its last attempt or `NORETRY` is given.
-`RETRYIN` replaces the computed backoff. Reply: **array of 2** — bulk `retry`
+`RETRYIN` replaces the computed backoff. An option can only follow an error
+message (which may be empty), so a message can never be mistaken for an
+option. Reply: **array of 2** — bulk `retry`
 or `dead`, and integer retry time (unix ms; 0 when dead).
 
 Errors: `ERR`, `NOTFOUND`, `STALE`.
@@ -291,7 +303,7 @@ Errors: `ERR`, `NOTFOUND`, `STATE` (the job is not dead).
 | `PING [msg]` | `+PONG`, or `msg` as a bulk | |
 | `ECHO msg` | bulk | |
 | `AUTH [username] password` | `+OK` / `-WRONGPASS` | the username is accepted for compatibility and ignored |
-| `HELLO [2 [AUTH user pass] [SETNAME name]]` | flat array describing the server | `HELLO 3` → `-NOPROTO`: baton speaks RESP2 only |
+| `HELLO [2\|3 [AUTH user pass] [SETNAME name]]` | field–value pairs describing the server | selects RESP2 or RESP3 for this connection; any other version → `-NOPROTO` |
 | `INFO [section]` | bulk | `key:value` lines under `# Section` headers, like Redis; sections `server`, `clients`, `memory`, `persistence`, `jobs` |
 | `QUIT` | `+OK`, then the connection is closed | |
 | `CLIENT SETNAME\|SETINFO\|GETNAME\|ID …`, `SELECT 0`, `COMMAND …` | harmless replies | sent automatically by redis-cli and client libraries on connect; accepted so that stock clients work |
