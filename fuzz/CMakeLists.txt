@@ -14,6 +14,7 @@ endfunction()
 
 baton_add_fuzzer(fuzz_log_segment SOURCES log_segment_fuzz.cpp LIBS baton_log baton_testing)
 baton_add_fuzzer(fuzz_log_damage SOURCES log_damage_fuzz.cpp LIBS baton_log baton_testing)
+baton_add_fuzzer(fuzz_resp_parser SOURCES resp_parser_fuzz.cpp LIBS baton_net)
 baton_add_fuzzer(fuzz_record_decode SOURCES record_decode_fuzz.cpp LIBS baton_state)
 baton_add_fuzzer(fuzz_state_apply SOURCES state_apply_fuzz.cpp LIBS baton_state)
 baton_add_fuzzer(fuzz_state_deserialize SOURCES state_deserialize_fuzz.cpp LIBS baton_state)

@@ -79,6 +79,16 @@ int main(int argc, char** argv) {
   write_seed(root / "fuzz_log_damage", "seed-append-garbage",
              std::string("\x04\x0C\x04\x02\x20\x07", 6));
 
+  // RESP parser: [chunk size byte][byte stream].
+  const std::string ping = "*1\r\n$4\r\nPING\r\n";
+  const std::string enqueue =
+      "*5\r\n$7\r\nENQUEUE\r\n$6\r\nemails\r\n$5\r\nhello\r\n$3\r\nKEY\r\n$2\r\nk1\r\n";
+  const std::string big =
+      "*3\r\n$7\r\nENQUEUE\r\n$1\r\nq\r\n$100\r\n" + std::string(100, 'x') + "\r\n";
+  write_seed(root / "fuzz_resp_parser", "seed-ping", "\x01" + ping);
+  write_seed(root / "fuzz_resp_parser", "seed-pipeline", "\x07" + enqueue + ping + "*0\r\n" + ping);
+  write_seed(root / "fuzz_resp_parser", "seed-oversized", "\x05" + ping + big + enqueue);
+
   // State machine targets: records and a serialized state from real traffic.
   baton::FakeClock clock;
   baton::MemoryRecordSink sink;

@@ -37,3 +37,9 @@ baton_add_test(state_test
     state/records_test.cpp
     state/state_test.cpp
   LIBS baton_state)
+
+baton_add_test(net_test
+  SOURCES
+    net/poller_test.cpp
+    net/resp_test.cpp
+  LIBS baton_net)

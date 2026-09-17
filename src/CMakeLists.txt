@@ -11,6 +11,7 @@ configure_file(common/version.h.in "${PROJECT_BINARY_DIR}/generated/common/versi
 # common <- log, sched <- state <- snapshot <- server; net depends only on common.
 add_subdirectory(common)
 add_subdirectory(log)
+add_subdirectory(net)
 add_subdirectory(sched)
 add_subdirectory(state)
 add_subdirectory(server)
