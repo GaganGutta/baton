@@ -43,3 +43,9 @@ baton_add_test(net_test
     net/poller_test.cpp
     net/resp_test.cpp
   LIBS baton_net)
+
+baton_add_test(server_test
+  SOURCES
+    server/config_test.cpp
+    server/server_test.cpp
+  LIBS baton_server baton_testing)
