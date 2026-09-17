@@ -39,6 +39,8 @@ mutants=(
   "wall-clock jumps go unnoticed|src/state/engine.cpp|s,  if (std::abs(change) <= options_.clock_jump_threshold_ms) return;,  if (true) return;,|tests/unit/state_test"
   "clock jump expires leases without a grace period|src/state/engine.cpp|s,  state_.rebuild_derived(options_.lease_grace_ms);,  state_.rebuild_derived(0);,|tests/unit/state_test"
   "DLQ retry keeps the spent attempts|src/state/state.cpp|s,  job->attempts = 0;,  // mutant,|tests/unit/state_test"
+  "repeated ACK accepted for any token|src/state/engine.cpp|s,done->state == JobState::kSucceeded && done->lease_token == token) {,done->state == JobState::kSucceeded) {,|tests/unit/state_test"
+  "lease expired before its wall-clock expiry|src/state/state.cpp|s,      if (job->lease_expires_at > wall_now_) {,      if (false) {,|tests/unit/state_test"
   "snapshot renamed into place without fsync|src/snapshot/snapshot.cpp|s,  if (written.ok()) written = file->sync();,  // mutant,|tests/unit/snapshot_test"
   "snapshot rename not made durable|src/snapshot/snapshot.cpp|s,^  BATON_RETURN_IF_ERROR(fs.sync_dir(dir));,  // mutant,|tests/unit/snapshot_test"
   "log compacted on the strength of the newest snapshot|src/snapshot/snapshot.cpp|s,    const Lsn covered = snapshots\[kSnapshotKeepCount - 1\];,    const Lsn covered = snapshots[0];,|tests/unit/snapshot_test"
