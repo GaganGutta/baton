@@ -11,6 +11,7 @@ Contents:
 1. [Goals and non-goals](#1-goals-and-non-goals)
 2. [Architecture in one page](#2-architecture-in-one-page)
 3. [M0 — Foundations](#3-m0--foundations)
+4. [M1 — The durable log](#4-m1--the-durable-log)
 
 ---
 
@@ -206,6 +207,211 @@ Linux is the primary target (epoll, `fdatasync`). macOS builds and runs for
 local development (kqueue, `F_FULLFSYNC`); CI builds and runs the unit tests on
 macOS to keep that true. Windows is not supported; on Windows, use WSL2 or
 Docker.
+
+## 4. M1 — The durable log
+
+The log is baton's system of record: in-memory state is a cache of it. This
+section defines the on-disk format, how records get durable (group commit), and
+what recovery accepts, repairs and refuses.
+
+### 4.1 Files
+
+Everything lives flat in one data directory, so there is exactly one directory
+to fsync:
+
+```
+<data-dir>/
+  wal-00000000000000000001.log     segment; the number is the LSN of its first record
+  wal-00000000000000104858.log
+  ...
+```
+
+A **segment** is an append-only file. When the active segment reaches the
+segment size (default 64 MiB) the log thread rolls to a new one. Segments are
+the unit of deletion after a snapshot (M5).
+
+**Segment header** (32 bytes, little-endian):
+
+| Offset | Size | Field |
+|---|---|---|
+| 0 | 8 | magic `BATONLOG` |
+| 8 | 4 | format version (1) |
+| 12 | 4 | reserved (0) |
+| 16 | 8 | LSN of the first record in this segment |
+| 24 | 4 | CRC32C of bytes 0..23 |
+| 28 | 4 | reserved (0) |
+
+**Record** (17-byte header + payload):
+
+| Offset | Size | Field |
+|---|---|---|
+| 0 | 4 | payload length `n` |
+| 4 | 4 | CRC32C over bytes 0..3 and 8..(17+n) — everything except the CRC itself |
+| 8 | 1 | record type (opaque to the log; defined by the state machine in M2) |
+| 9 | 8 | LSN |
+| 17 | n | payload |
+
+LSNs start at 1 and increase by exactly 1 per record, across segments. The
+length is covered by the CRC so that a corrupted length cannot redirect the
+reader to a region that happens to checksum. Records larger than 64 MiB + 64 KiB
+are rejected as invalid, which bounds what a corrupted length can make the
+reader do.
+
+**CRC32C** (Castagnoli) rather than CRC32: better error detection for the same
+cost and hardware support on x86 (SSE4.2) and ARMv8. baton ships a
+slicing-by-8 software implementation and selects the hardware one at runtime
+when available; tests check both against the RFC 3720 vectors and against each
+other on random inputs.
+
+### 4.2 Group commit
+
+```
+event loop thread                         log thread
+─────────────────                         ──────────
+append(type, payload) → LSN   ┐
+append(...)                   │ encode into the
+append(...)                   ┘ pending batch
+flush()  ── batch (bytes, first/last LSN) ──►  write(batch)
+   keeps accumulating the next batch           fdatasync()        (policy: always)
+                                               durable_lsn = last LSN
+◄── wakeup: "durable up to LSN n" ─────────    notify
+release replies whose LSN ≤ n
+```
+
+The event loop assigns LSNs (it needs them to tag replies) and encodes records
+into a pending buffer. Once per loop iteration it hands the buffer to the log
+thread by swapping it into a mutex-protected inbox — the lock is held for a
+pointer swap, never for I/O. While the log thread is inside `fdatasync`, the
+loop keeps serving clients and the next batch grows. The batch size therefore
+adapts to the disk: a slow fsync produces big batches, a fast one small batches,
+and no tuning knob is needed. This is classic group commit.
+
+Two fsync policies:
+
+| Policy | A record is acknowledged when… | Survives process crash (SIGKILL, OOM) | Survives OS crash / power loss |
+|---|---|---|---|
+| `always` (default) | `fdatasync` covering it has returned | yes | yes |
+| `interval` | `write` covering it has returned; `fdatasync` runs every *N* ms (default 100) | yes — the page cache outlives the process | up to the last *N* ms of acknowledged operations may be lost |
+
+`interval` is the same trade Redis offers with `appendfsync everysec` and
+Beanstalkd with `-f <ms>`. It is opt-in and the README says exactly what it
+gives up.
+
+**Backpressure.** The front end exposes the number of bytes appended but not
+yet acknowledged. The server (M3) stops reading from client sockets when that
+backlog passes a bound, so a disk that cannot keep up slows clients down
+through TCP instead of growing memory without limit.
+
+### 4.3 What happens when the disk misbehaves
+
+**`fdatasync` fails → log the error and abort.** After a failed fsync the
+kernel may already have marked the dirty pages clean and dropped them; a retry
+can then return success without the data ever reaching the disk (the 2018
+PostgreSQL "fsyncgate" finding). Once fsync has failed, the process can no
+longer know what is durable, so the only honest move is to stop and let
+recovery read back what actually reached the disk. Nothing that was
+acknowledged is affected — acknowledgement only ever follows a *successful*
+fsync.
+
+**`write` fails (ENOSPC, EIO) → log the error and abort.** baton applies a
+record to memory before it is durable (that is what makes pipelining and group
+commit possible), so when a record cannot be written, memory is ahead of the
+log and there is no undo. Crashing and replaying the log is the undo. To keep a
+full disk from being a surprise, the server (M3) checks free space and rejects
+new work with a clear `LIMIT` error before the disk is actually full.
+
+**Directories are fsynced** after every create, rename and delete. `fsync` on a
+file does not make its directory entry durable; without the directory fsync a
+freshly rolled segment can vanish in a crash even though its contents were
+synced. macOS uses `fcntl(F_FULLFSYNC)`, because plain `fsync` there does not
+flush the drive cache.
+
+### 4.4 Recovery: repair a torn tail, refuse everything else
+
+On startup the log is scanned from the oldest segment. Every record must have a
+valid CRC and the next expected LSN. The interesting question is what to do
+when one does not.
+
+A crash in the middle of writing can only damage **the end of the last
+segment**: everything before the last successful fsync is intact, and only one
+un-acknowledged batch can be in flight. So:
+
+| Finding | Meaning | Action |
+|---|---|---|
+| Invalid record in the last segment, and **no valid record anywhere after it** | torn final write; nothing after it was ever acknowledged | truncate the segment at the record's offset, fsync, continue |
+| Last segment shorter than a header, or header invalid, and no valid record in the file | crash while creating the segment | delete it, fsync the directory, continue |
+| Invalid record in the last segment **followed by a valid record** | damage in the middle of the log (bit rot, bad sector, operator error); acknowledged data may be affected | **refuse to start** |
+| Invalid record or header in any segment but the last | same | **refuse to start** |
+| LSN gap between or within segments, a missing middle segment, first LSN in header ≠ file name | same | **refuse to start** |
+
+"No valid record after it" is decided by scanning the rest of the segment at
+every byte offset for a header that is plausible (length within bounds, LSN
+within the range that could follow the last good record) and whose CRC matches.
+A false positive needs a 32-bit CRC collision on top of a plausible header, and
+the failure mode of a false positive is the safe one (refusing to start).
+
+There is one known case where this rule is stricter than necessary: a torn
+multi-block write where a later block reached the disk but an earlier one did
+not leaves a valid un-acknowledged record after an invalid one. baton cannot
+distinguish that from mid-log corruption without knowing the durable boundary,
+so it refuses, and the operator decides. Refusing loudly is the right default
+for a system whose one job is not losing acknowledged work; silently truncating
+at the first bad record (what many logs do) would turn a flipped bit into
+quietly dropped jobs.
+
+After a successful scan the writer reopens the last segment and appends after
+the last valid record.
+
+### 4.5 Testing the log against crashes: `SimFs`
+
+All file access goes through a small `FileSystem` interface with two
+implementations: `PosixFs` and `SimFs`, an in-memory file system built for
+crash testing. `SimFs` models exactly the two things that matter:
+
+- File contents are **volatile until `sync()`**. On a simulated crash a file
+  keeps its synced bytes plus an arbitrary, possibly garbled, prefix of the
+  unsynced tail.
+- Directory entries (create, rename, remove) are **volatile until
+  `sync_dir()`**. A file that was written and synced but whose directory was
+  never synced does not exist after a crash.
+
+`SimFs` can capture a "crash image" after the *n*-th file-system operation
+while the system under test keeps running. A test then recovers from that image
+and checks it against what had been acknowledged at the moment of capture. This
+turns "did we fsync the directory?" and "is every acknowledged record
+recoverable no matter where the crash lands?" into deterministic unit tests
+instead of hopes. It can also inject `sync` and `write` failures to test the
+abort paths.
+
+Test plan: CRC vectors; codec round trips and bounds; segment round trip and
+roll; truncation of the final record at **every** byte offset → recovers all
+earlier records; a bit flip at **every** byte of a mid-log record → refuses; a
+flipped bit in the final record with nothing after it → treated as torn; LSN
+gap, missing middle segment, wrong header LSN → refuse; torn segment creation →
+repaired; fsync failure and write failure → abort (death tests); group commit
+ordering, batch accounting and both policies; randomized `SimFs` crash-image
+tests (every acknowledged LSN is recovered, recovered LSNs are contiguous, the
+log accepts appends after recovery); ThreadSanitizer over all of it; a libFuzzer
+target for the segment reader.
+
+### 4.6 Alternatives considered
+
+- **Fixed-size blocks with record fragments (LevelDB/RocksDB log format).**
+  Allows resynchronizing after corruption at the next block boundary. baton
+  does not want to resynchronize — it refuses to start — so the simpler
+  length-prefixed format is enough.
+- **Preallocating segments** (`fallocate`) makes appends cheaper on some file
+  systems and lets etcd detect torn writes by looking for zeroed sectors. It
+  also makes "where does the log end?" depend on recognizing zeros. Plain
+  appends keep the file size meaningful; revisit if benchmarks show allocation
+  cost matters.
+- **`O_DIRECT` / `O_DSYNC`.** `O_DSYNC` makes every write synchronous and gives
+  up group commit's batching of the flush. `O_DIRECT` needs aligned buffers and
+  bypasses the page cache that the `interval` policy relies on.
+- **One file instead of segments.** Compaction would need rewriting the whole
+  file; with segments it is `unlink`.
+- **io_uring.** One sequential writer issuing write+fsync gains little from it
+  and it would cost the macOS port.
 
 ---
 

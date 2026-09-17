@@ -6,16 +6,16 @@ from here with no other context. Read `PLAN.md` for the task breakdown and
 
 ## Status
 
-- **Current milestone:** M0 (scaffold) — in progress
-- **Last completed task:** environment check, repo created, `PLAN.md` written
-- **Next task:** M0 scaffold (CMake presets, common library, CI, Dockerfile, doc skeletons)
+- **Current milestone:** M1 (durable log) — in progress
+- **Last completed task:** M0 done (CI green on first push, run 35181138012); M1 design section written
+- **Next task:** M1 code: crc32c → codec → FileSystem (PosixFs + SimFs) → log format/reader/recovery → group-commit log thread
 
 ## Milestones
 
 | Milestone | State | Notes |
 |---|---|---|
-| M0 Scaffold | in progress | |
-| M1 Durable log | not started | |
+| M0 Scaffold | **done** | CI: gcc-14 + clang-18 (release, asan), tsan, tidy (LLVM 21), macOS, Docker |
+| M1 Durable log | in progress | design in docs/design.md §4 |
 | M2 State machine | not started | |
 | M3 Networking | not started | |
 | M4 Leases/retries/DLQ | not started | |
@@ -53,7 +53,9 @@ justification in `docs/design.md` when its milestone starts.
 
 ## Open issues
 
-- None yet.
+- Docker Desktop did not come up when started from the command line on
+  2026-09-17 (daemon pipe never appeared). Not blocking: CI builds and smoke
+  tests the image. It must be running for the M8 Beanstalkd/Faktory comparison.
 
 ## Things that could not be done as specified
 
