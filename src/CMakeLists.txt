@@ -14,6 +14,7 @@ add_subdirectory(log)
 add_subdirectory(net)
 add_subdirectory(sched)
 add_subdirectory(state)
+add_subdirectory(snapshot)
 add_subdirectory(server)
 
 if(BATON_BUILD_TESTS OR BATON_BUILD_FUZZ)

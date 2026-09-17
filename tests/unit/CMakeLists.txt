@@ -45,6 +45,12 @@ baton_add_test(net_test
     net/resp_test.cpp
   LIBS baton_net)
 
+baton_add_test(snapshot_test
+  SOURCES
+    snapshot/recovery_test.cpp
+    snapshot/snapshot_test.cpp
+  LIBS baton_snapshot baton_testing)
+
 baton_add_test(server_test
   SOURCES
     server/config_test.cpp
