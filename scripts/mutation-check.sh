@@ -30,6 +30,9 @@ mutants=(
   "ready order ignores priority|src/state/ready_heap.cpp|s,  if (a.priority != b.priority) return a.priority > b.priority;,  // mutant,|tests/unit/state_test"
   "idempotency window never expires|src/state/engine.cpp|s,    if (entry != nullptr && entry->expires_at > now) {,    if (entry != nullptr) {,|tests/unit/state_test"
   "idempotency key not recorded|src/state/state.cpp|s,  if (!r.idem_key.empty()) upsert_idem(r.idem_key\, r.id\, r.idem_expires_at);,  // mutant,|tests/unit/state_test"
+  "replies sent before their records are durable|src/server/server.cpp|s,  if (c.marks.empty() && lsn <= committed_lsn_) {,  if (true) {,|tests/unit/server_test"
+  "parked RESERVEs served newest first|src/server/server.cpp|s,      Connection\* c = find(it->second.front());,      Connection* c = find(it->second.back());,|tests/unit/server_test"
+  "commands allowed without AUTH|src/server/server.cpp|s,    } else if (command->needs_auth && !c.authenticated) {,    } else if (false) {,|tests/unit/server_test"
 )
 
 rsync -a --exclude build --exclude .git ./ "$work/src/"
@@ -37,11 +40,16 @@ cmake -S "$work/src" -B "$work/build" -G Ninja -DCMAKE_BUILD_TYPE=Debug >/dev/nu
 
 build_and_test() {  # $1 = test binary; returns 0 if the tests pass
   cmake --build "$work/build" -j "$jobs" --target "$(basename "$1")" >/dev/null 2>&1 || return 2
-  "$work/build/$1" --gtest_brief=1 >/dev/null 2>&1
+  # A mutant may hang a test instead of failing it; a timeout counts as killed.
+  if command -v timeout >/dev/null; then
+    timeout 900 "$work/build/$1" --gtest_brief=1 >/dev/null 2>&1
+  else
+    "$work/build/$1" --gtest_brief=1 >/dev/null 2>&1
+  fi
 }
 
 echo "baseline:"
-for binary in tests/unit/log_test tests/unit/state_test; do
+for binary in tests/unit/log_test tests/unit/state_test tests/unit/server_test; do
   if build_and_test "$binary"; then
     echo "  ok: $(basename "$binary") passes on the unmodified tree"
   else
